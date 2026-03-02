@@ -11,8 +11,8 @@ class BalancedBatchSampler(Sampler):
         self.labels = np.array(labels).flatten()
         self.batch_size = batch_size
         self.sampler_ratio = sampler_ratio
-        self.num_pos = int(self.batch_size * self.sampler_ratio)
-        self.num_neg = self.batch_size - self.num_pos
+        self.num_neg = int(self.batch_size * self.sampler_ratio)
+        self.num_pos = self.batch_size - self.num_neg
         self.pos_indices = np.where(self.labels == 1)[0]
         self.neg_indices = np.where(self.labels == 0)[0]
         assert self.num_pos > 0 and self.num_neg > 0, "Batch size and sampler_ratio must result in at least 1 positive and 1 negative."
