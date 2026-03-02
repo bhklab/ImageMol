@@ -1,4 +1,5 @@
 import argparse
+import matplotlib.pyplot as plt
 import os
 from collections import Counter
 import numpy as np
@@ -15,7 +16,6 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implementation of ImageMol')
@@ -145,11 +145,28 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     results = {'highest_valid': min_value, 'final_train': min_value, 'final_test': min_value, 'highest_train': min_value, 'highest_valid_desc': None, "final_train_desc": None, "final_test_desc": None}
     early_stop = 0
     patience = 30
+    # Lists to store metrics for plotting
+    train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
+    train_f1_list, val_f1_list, test_f1_list = [], [], []
     for epoch in range(args.start_epoch, args.epochs):
         train_one_epoch_multitask(model=model, optimizer=optimizer, data_loader=train_dataloader, criterion=criterion, weights=weights, device=device, epoch=epoch, task_type=args.task_type)
         train_loss, train_results, train_data_dict = evaluate_on_multitask(model=model, data_loader=train_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         val_loss, val_results, val_data_dict = evaluate_on_multitask(model=model, data_loader=val_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         test_loss, test_results, test_data_dict = evaluate_on_multitask(model=model, data_loader=test_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
+
+        # Store all of the metrics for plotting
+        train_aupr = train_results.get('AUPR', None)
+        val_aupr = val_results.get('AUPR', None)
+        test_aupr = test_results.get('AUPR', None)
+        train_f1 = train_results.get('F1', None)
+        val_f1 = val_results.get('F1', None)
+        test_f1 = test_results.get('F1', None)
+        train_aupr_list.append(train_aupr)
+        val_aupr_list.append(val_aupr)
+        test_aupr_list.append(test_aupr)
+        train_f1_list.append(train_f1)
+        val_f1_list.append(val_f1)
+        test_f1_list.append(test_f1)
 
         train_result = train_results[eval_metric.upper()]
         valid_result = val_results[eval_metric.upper()]
@@ -181,6 +198,28 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                 results[k] = float(v)
         if args.save_finetune_ckpt == 1:
             save_finetune_ckpt(model, optimizer, round(train_loss, 4), epoch, args.log_dir, f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}", lr_scheduler=None, result_dict=results)
+
+    # Plot AUPR and F1 scores
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    epochs = range(args.start_epoch, args.start_epoch + len(train_aupr_list))
+    ax1.plot(epochs, train_aupr_list, label='Train AUPR', color='blue')
+    ax1.plot(epochs, val_aupr_list, label='Val AUPR', color='orange')
+    ax1.plot(epochs, test_aupr_list, label='Test AUPR', color='green')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('AUPR')
+    ax1.legend(loc='upper left')
+
+    ax2 = ax1.twinx()
+    ax2.plot(epochs, train_f1_list, label='Train F1', color='blue', linestyle='dashed')
+    ax2.plot(epochs, val_f1_list, label='Val F1', color='orange', linestyle='dashed')
+    ax2.plot(epochs, test_f1_list, label='Test F1', color='green', linestyle='dashed')
+    ax2.set_ylabel('F1 Score')
+    ax2.legend(loc='upper right')
+
+    plt.title(f"AUPR and F1 over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
+    plot_path = os.path.join(args.log_dir, f"aupr_f1_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_plot.png")
+    plt.savefig(plot_path)
+    plt.close(fig)
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
     
