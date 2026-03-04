@@ -54,3 +54,6 @@ COPY . /workspace
 
 # Start the container with the finetuning script
 ENTRYPOINT ["python", "finetune.py"]
+
+# Start the container with a config file if desired
+# ENTRYPOINT ["python", "finetune.py", "--config", "config.yaml"]

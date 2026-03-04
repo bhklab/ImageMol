@@ -16,9 +16,14 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
+from deepchem.splits.splitters import ScaffoldSplitter
+import yaml
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implementation of ImageMol')
+
+    # config file
+    parser.add_argument('--config', default=None, type=str, help='path to config file (default: None)')
 
     # basic
     parser.add_argument('--dataset', type=str, default="bbbp", help='dataset name, e.g. bbbp, tox21, to pull from bucket')
@@ -314,4 +319,12 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
+
+    if args.config:
+        with open(args.config, 'r') as f:
+            config_args = yaml.safe_load(f)
+        for key, value in config_args.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+
     main(args)
