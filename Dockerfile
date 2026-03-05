@@ -1,5 +1,5 @@
 # ==========================================
-# STAGE 1: The Builder
+# Build Stage
 # ==========================================
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04 AS builder
 
@@ -14,7 +14,6 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
     rm ~/miniconda.sh
 
 # Create the environment and install everything
-# We use 'conda clean' and '--no-cache-dir' to keep the size down immediately
 ENV PATH=/opt/conda/bin:$PATH
 RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -26,19 +25,18 @@ RUN /opt/conda/envs/imagemol/bin/pip install torch torchvision --index-url https
     conda clean -afy
 
 
-# Copy and install your requirements
+# Install the rest of the dependencies from requirements.txt into the conda environment
 COPY requirements.txt /tmp/requirements.txt
 RUN /opt/conda/envs/imagemol/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 
-# CRITICAL: Remove conda index caches and package tarballs
+# clean conda cache
 RUN conda clean -afy
 
 # ==========================================
-# STAGE 2: The Final Runtime
+# Runtime Stage
 # ==========================================
 FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
-# Only install the bare essentials for the OS to run
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 libxext6 && \
     rm -rf /var/lib/apt/lists/*
@@ -46,14 +44,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the entire conda environment from the builder stage
 COPY --from=builder /opt/conda /opt/conda
 
-
 # Set environment paths
 ENV PATH=/opt/conda/envs/imagemol/bin:/opt/conda/bin:$PATH
 
 WORKDIR /workspace
 
-# 4. Copy over application files
+# Copy over training code
 COPY . /workspace
 
-# If this container is run on a custom job instead of a workbench, automate the running process:
+# Start the container with the finetuning script
 ENTRYPOINT ["python", "finetune.py"]
+
+# Start the container with a config file if desired
+# ENTRYPOINT ["python", "finetune.py", "--config", "config.yaml"]

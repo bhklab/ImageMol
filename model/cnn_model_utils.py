@@ -38,31 +38,31 @@ def load_model(modelname="ResNet18", imageSize=224, num_classes=2):
 
 
 # evaluation for classification
-def metric(y_true, y_pred, y_prob):
-    acc = metrics.accuracy_score(y_true, y_pred)
-    auc = metrics.roc_auc_score(y_true, y_prob)
-    f1 = metrics.f1_score(y_true, y_pred)
-    precision_list, recall_list, _ = metrics.precision_recall_curve(y_true, y_prob)
-    aupr = metrics.auc(recall_list, precision_list)
-    precision = metrics.precision_score(y_true, y_pred, zero_division=1)
-    recall = metrics.recall_score(y_true, y_pred, zero_division=1)
-    kappa = metrics.cohen_kappa_score(y_true, y_pred)
-    matthews = metrics.matthews_corrcoef(y_true, y_pred)
-    fpr, tpr, threshold = metrics.roc_curve(y_true, y_prob)
-    return {
-        "accuracy": acc,
-        "ROCAUC": auc,
-        "f1": f1,
-        "AUPR": aupr,
-        "precision": precision,
-        "recall": recall,
-        "kappa": kappa,
-        "matthews": matthews,
-        "fpr": fpr,  # list
-        "tpr": tpr,  # list
-        "precision_list": precision_list,
-        "recall_list": recall_list
-    }
+# def metric(y_true, y_pred, y_prob):
+#     acc = metrics.accuracy_score(y_true, y_pred)
+#     auc = metrics.roc_auc_score(y_true, y_prob)
+#     f1 = metrics.f1_score(y_true, y_pred)
+#     precision_list, recall_list, _ = metrics.precision_recall_curve(y_true, y_prob)
+#     aupr = metrics.auc(recall_list, precision_list)
+#     precision = metrics.precision_score(y_true, y_pred, zero_division=1)
+#     recall = metrics.recall_score(y_true, y_pred, zero_division=1)
+#     kappa = metrics.cohen_kappa_score(y_true, y_pred)
+#     matthews = metrics.matthews_corrcoef(y_true, y_pred)
+#     fpr, tpr, threshold = metrics.roc_curve(y_true, y_prob)
+#     return {
+#         "accuracy": acc,
+#         "ROCAUC": auc,
+#         "f1": f1,
+#         "AUPR": aupr,
+#         "precision": precision,
+#         "recall": recall,
+#         "kappa": kappa,
+#         "matthews": matthews,
+#         "fpr": fpr,  # list
+#         "tpr": tpr,  # list
+#         "precision_list": precision_list,
+#         "recall_list": recall_list
+#     }
 
 
 def train_one_epoch_multitask(model, optimizer, data_loader, criterion, weights, device, epoch, task_type):

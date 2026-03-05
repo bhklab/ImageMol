@@ -5,6 +5,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
 
 
@@ -18,6 +19,18 @@ def generate_scaffold(smiles, include_chirality=False):
     scaffold = MurckoScaffold.MurckoScaffoldSmiles(
         smiles=smiles, includeChirality=include_chirality)
     return scaffold
+
+def stratified_k_fold_split_train_val_test(idx, y, n_splits=5, seed=42):
+    random.seed(seed)
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    splits = []
+    for train_idx, test_idx in skf.split(idx, y):
+        train_idx, valid_idx = train_test_split(train_idx, test_size=0.1, shuffle=True, stratify=y[train_idx],
+                                                random_state=seed)
+        splits.append((train_idx, valid_idx, test_idx))
+
+    return splits
 
 
 def split_train_val_test_idx(idx, frac_train=0.8, frac_valid=0.1, frac_test=0.1, sort=False, seed=42):

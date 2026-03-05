@@ -111,14 +111,6 @@ def get_datasets(dataset, dataroot, data_type="raw", bucket_name=None):
             create_directories=True
         )
 
-
-        # old sequential download code
-        # for blob in blobs:
-        #     local_path = os.path.join(dataroot, blob.name)
-        #     os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        #     print(f"Downloading {blob.name} to {local_path}")
-        #     blob.download_to_filename(local_path)
-
         # Download txt file
         txt_blob = bucket.blob(f"{dataset}/{data_type}/{dataset}_processed_ac.csv")
         txt_blob.download_to_filename(txt_file)
