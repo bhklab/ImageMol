@@ -1,5 +1,4 @@
 import argparse
-import matplotlib.pyplot as plt
 import os
 from collections import Counter
 import numpy as np
@@ -18,6 +17,9 @@ from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_st
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
 from model.evaluate import compute_topk_precision_f1
 import yaml
+
+from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implementation of ImageMol')
@@ -111,7 +113,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     if len(device_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
 
-    # optimizer 
+    # Initialize the optimizer
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(
             filter(lambda x: x.requires_grad, model.parameters()),
@@ -134,6 +136,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
 
+    # Initialize the loss function
     weights = None
     if args.task_type == "classification":
         if args.weighted_CE:
@@ -150,13 +153,15 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     results = {'highest_valid': min_value, 'final_train': min_value, 'final_test': min_value, 'highest_train': min_value, 'highest_valid_desc': None, "final_train_desc": None, "final_test_desc": None}
     early_stop = 0
     patience = 30
+
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
     train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
     train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
-
     topk_k = 15
+
+    ########### Train the model for the required epochs ################
 
     for epoch in range(args.start_epoch, args.epochs):
         train_one_epoch_multitask(model=model, optimizer=optimizer, data_loader=train_dataloader, criterion=criterion, weights=weights, device=device, epoch=epoch, task_type=args.task_type)
@@ -202,10 +207,9 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                      f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
                      f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         print(epoch_log)
+        
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
-        with open(log_file_path, "a") as f:
-            f.write(str(epoch_log) + "\n")
-            f.write("train_results:" + str(train_results) + "\n")
+        output_epoch_results(log_file_path, epoch_log, train_results)
 
         if is_left_better_right(train_result, results['highest_train'], standard=valid_select):
             results['highest_train'] = train_result
@@ -227,33 +231,25 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         if args.save_finetune_ckpt == 1:
             save_finetune_ckpt(model, optimizer, round(train_loss, 4), epoch, args.log_dir, f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}", lr_scheduler=None, result_dict=results)
 
-    # Plot AUPR, F1, Top-k Precision, Top-k F1
-    fig, ax1 = plt.subplots(figsize=(12, 7))
-    epochs = range(args.start_epoch, args.start_epoch + len(train_aupr_list))
-    ax1.plot(epochs, train_aupr_list, label='Train AUPR', color='blue')
-    ax1.plot(epochs, val_aupr_list, label='Val AUPR', color='orange')
-    ax1.plot(epochs, test_aupr_list, label='Test AUPR', color='green')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('AUPR')
-    ax1.legend(loc='upper left')
-
-    ax2 = ax1.twinx()
-    ax2.plot(epochs, train_f1_list, label='Train F1', color='blue', linestyle='dashed')
-    ax2.plot(epochs, val_f1_list, label='Val F1', color='orange', linestyle='dashed')
-    ax2.plot(epochs, test_f1_list, label='Test F1', color='green', linestyle='dashed')
-    ax2.plot(epochs, train_topk_prec_list, label=f'Train Top{topk_k} Prec', color='blue', linestyle='dotted')
-    ax2.plot(epochs, val_topk_prec_list, label=f'Val Top{topk_k} Prec', color='orange', linestyle='dotted')
-    ax2.plot(epochs, test_topk_prec_list, label=f'Test Top{topk_k} Prec', color='green', linestyle='dotted')
-    ax2.plot(epochs, train_topk_f1_list, label=f'Train Top{topk_k} F1', color='blue', linestyle='dashdot')
-    ax2.plot(epochs, val_topk_f1_list, label=f'Val Top{topk_k} F1', color='orange', linestyle='dashdot')
-    ax2.plot(epochs, test_topk_f1_list, label=f'Test Top{topk_k} F1', color='green', linestyle='dashdot')
-    ax2.set_ylabel('F1 / Top-k Metrics')
-    ax2.legend(loc='upper right')
-
-    plt.title(f"AUPR, F1, Top{topk_k} Precision & F1 over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
     plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
-    plt.savefig(plot_path)
-    plt.close(fig)
+    gen_epoch_metric_plot(
+        plot_path,
+        args.start_epoch,
+        train_aupr_list,
+        val_aupr_list,
+        test_aupr_list,
+        train_f1_list,
+        val_f1_list,
+        test_f1_list,
+        train_topk_prec_list,
+        val_topk_prec_list,
+        test_topk_prec_list,
+        train_topk_f1_list,
+        val_topk_f1_list,
+        test_topk_f1_list,
+        topk_k,
+        fold
+    )
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
 
@@ -344,14 +340,8 @@ def main(args):
         avg_train = np.mean([r['final_train'] for r in fold_results])
         avg_test = np.mean([r['final_test'] for r in fold_results])
 
-        # output final results to the log file
         final_output_path = os.path.join(args.log_dir, "final_results.txt")
-        with open(final_output_path, "w") as f:
-            f.write(f"===== Stratified 5-Fold CV Results =====\nAvg highest_valid: {avg_valid:.3f}, Avg final_train: {avg_train:.3f}, Avg final_test: {avg_test:.3f}\n")
-            f.write(f"\nDetails for each fold:\n")
-            for fold, r in enumerate(fold_results):
-                f.write(f"Fold {fold+1} results: highest_valid: {r['highest_valid']:.3f}, final_train: {r['final_train']:.3f}, final_test: {r['final_test']:.3f}\n")
-                f.write(f"Fold {fold+1} details:\nhighest_valid_desc: {r['highest_valid_desc']}\nfinal_train_desc: {r['final_train_desc']}\nfinal_test_desc: {r['final_test_desc']}\n\n")
+        output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test, fold_results)
 
 if __name__ == "__main__":
     args = parse_args()
