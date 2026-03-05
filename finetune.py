@@ -16,6 +16,7 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
+from model.evaluate import compute_topk_precision_f1
 import yaml
 
 def parse_args():
@@ -152,6 +153,11 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
+    train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
+    train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
+
+    topk_k = 15
+
     for epoch in range(args.start_epoch, args.epochs):
         train_one_epoch_multitask(model=model, optimizer=optimizer, data_loader=train_dataloader, criterion=criterion, weights=weights, device=device, epoch=epoch, task_type=args.task_type)
         train_loss, train_results, train_data_dict = evaluate_on_multitask(model=model, data_loader=train_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
@@ -172,11 +178,29 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         val_f1_list.append(val_f1)
         test_f1_list.append(test_f1)
 
+        # Compute top-15 precision and F1 for train/val/test
+        for split_data_dict, split_labels, prec_list, f1_list in [
+            (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
+            (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
+            (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
+        ]:
+            # Get predicted probabilities and true labels (flatten if multitask)
+            probs = split_data_dict['probs'].flatten() if 'probs' in split_data_dict else np.array([])
+            labels = split_data_dict['labels'].flatten() if 'labels' in split_data_dict else np.array([])
+            if len(probs) > 0 and len(labels) > 0:
+                prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
+            else:
+                prec, f1 = None, None
+            prec_list.append(prec)
+            f1_list.append(f1)
+
         train_result = train_results[eval_metric.upper()]
         valid_result = val_results[eval_metric.upper()]
         test_result = test_results[eval_metric.upper()]
 
-        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result}
+        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result,
+                     f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
+                     f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         print(epoch_log)
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
         with open(log_file_path, "a") as f:
@@ -203,8 +227,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         if args.save_finetune_ckpt == 1:
             save_finetune_ckpt(model, optimizer, round(train_loss, 4), epoch, args.log_dir, f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}", lr_scheduler=None, result_dict=results)
 
-    # Plot AUPR and F1 scores
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    # Plot AUPR, F1, Top-k Precision, Top-k F1
+    fig, ax1 = plt.subplots(figsize=(12, 7))
     epochs = range(args.start_epoch, args.start_epoch + len(train_aupr_list))
     ax1.plot(epochs, train_aupr_list, label='Train AUPR', color='blue')
     ax1.plot(epochs, val_aupr_list, label='Val AUPR', color='orange')
@@ -217,16 +241,22 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     ax2.plot(epochs, train_f1_list, label='Train F1', color='blue', linestyle='dashed')
     ax2.plot(epochs, val_f1_list, label='Val F1', color='orange', linestyle='dashed')
     ax2.plot(epochs, test_f1_list, label='Test F1', color='green', linestyle='dashed')
-    ax2.set_ylabel('F1 Score')
+    ax2.plot(epochs, train_topk_prec_list, label=f'Train Top{topk_k} Prec', color='blue', linestyle='dotted')
+    ax2.plot(epochs, val_topk_prec_list, label=f'Val Top{topk_k} Prec', color='orange', linestyle='dotted')
+    ax2.plot(epochs, test_topk_prec_list, label=f'Test Top{topk_k} Prec', color='green', linestyle='dotted')
+    ax2.plot(epochs, train_topk_f1_list, label=f'Train Top{topk_k} F1', color='blue', linestyle='dashdot')
+    ax2.plot(epochs, val_topk_f1_list, label=f'Val Top{topk_k} F1', color='orange', linestyle='dashdot')
+    ax2.plot(epochs, test_topk_f1_list, label=f'Test Top{topk_k} F1', color='green', linestyle='dashdot')
+    ax2.set_ylabel('F1 / Top-k Metrics')
     ax2.legend(loc='upper right')
 
-    plt.title(f"AUPR and F1 over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
-    plot_path = os.path.join(args.log_dir, f"aupr_f1_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_plot.png")
+    plt.title(f"AUPR, F1, Top{topk_k} Precision & F1 over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
+    plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
     plt.savefig(plot_path)
     plt.close(fig)
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
-    
+
     return results
 
 def main(args):
@@ -318,6 +348,7 @@ def main(args):
         final_output_path = os.path.join(args.log_dir, "final_results.txt")
         with open(final_output_path, "w") as f:
             f.write(f"===== Stratified 5-Fold CV Results =====\nAvg highest_valid: {avg_valid:.3f}, Avg final_train: {avg_train:.3f}, Avg final_test: {avg_test:.3f}\n")
+            f.write(f"\nDetails for each fold:\n")
             for fold, r in enumerate(fold_results):
                 f.write(f"Fold {fold+1} results: highest_valid: {r['highest_valid']:.3f}, final_train: {r['final_train']:.3f}, final_test: {r['final_test']:.3f}\n")
                 f.write(f"Fold {fold+1} details:\nhighest_valid_desc: {r['highest_valid_desc']}\nfinal_train_desc: {r['final_train_desc']}\nfinal_test_desc: {r['final_test_desc']}\n\n")
