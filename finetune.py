@@ -314,8 +314,14 @@ def main(args):
         avg_valid = np.mean([r['highest_valid'] for r in fold_results])
         avg_train = np.mean([r['final_train'] for r in fold_results])
         avg_test = np.mean([r['final_test'] for r in fold_results])
-        print(f"\n===== Stratified 5-Fold CV Results =====\nAvg highest_valid: {avg_valid:.3f}, Avg final_train: {avg_train:.3f}, Avg final_test: {avg_test:.3f}")
 
+        # output final results to the log file
+        final_output_path = os.path.join(args.log_dir, "final_results.txt")
+        with open(final_output_path, "w") as f:
+            f.write(f"===== Stratified 5-Fold CV Results =====\nAvg highest_valid: {avg_valid:.3f}, Avg final_train: {avg_train:.3f}, Avg final_test: {avg_test:.3f}\n")
+            for fold, r in enumerate(fold_results):
+                f.write(f"Fold {fold+1} results: highest_valid: {r['highest_valid']:.3f}, final_train: {r['final_train']:.3f}, final_test: {r['final_test']:.3f}\n")
+                f.write(f"Fold {fold+1} details:\nhighest_valid_desc: {r['highest_valid_desc']}\nfinal_train_desc: {r['final_train_desc']}\nfinal_test_desc: {r['final_test_desc']}\n\n")
 
 if __name__ == "__main__":
     args = parse_args()
