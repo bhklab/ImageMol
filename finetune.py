@@ -16,7 +16,6 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
-from deepchem.splits.splitters import ScaffoldSplitter
 import yaml
 
 def parse_args():

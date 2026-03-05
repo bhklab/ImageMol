@@ -6,3 +6,4 @@ torch-geometric
 pandas
 numpy
 google-cloud-storage
+pyyaml
