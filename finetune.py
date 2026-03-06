@@ -62,8 +62,12 @@ def parse_args():
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
+    parser.add_argument('--run_num', type=int, default=0, help='unique run number for output folder, if not specified, will use 0')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Update log_dir to include run_num as a subdirectory
+    args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
+    return args
 
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
@@ -228,8 +232,14 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         for k, v in results.items():
             if isinstance(v, np.generic):
                 results[k] = float(v)
-        if args.save_finetune_ckpt == 1:
-            save_finetune_ckpt(model, optimizer, round(train_loss, 4), epoch, args.log_dir, f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}", lr_scheduler=None, result_dict=results)
+        # Save checkpoint only in the final 2 epochs
+        if args.save_finetune_ckpt == 1 and epoch >= args.epochs - 2:
+            checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
+            save_finetune_ckpt(
+                model, optimizer, round(train_loss, 4), epoch, checkpoint_dir,
+                f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}",
+                lr_scheduler=None, result_dict=results
+            )
 
     plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
     gen_epoch_metric_plot(
