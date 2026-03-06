@@ -1,5 +1,4 @@
 import argparse
-import matplotlib.pyplot as plt
 import os
 from collections import Counter
 import numpy as np
@@ -16,7 +15,11 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
+from model.evaluate import compute_topk_precision_f1
 import yaml
+
+from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implementation of ImageMol')
@@ -59,8 +62,12 @@ def parse_args():
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
+    parser.add_argument('--run_num', type=int, default=0, help='unique run number for output folder, if not specified, will use 0')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Update log_dir to include run_num as a subdirectory
+    args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
+    return args
 
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
@@ -110,7 +117,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     if len(device_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
 
-    # optimizer 
+    # Initialize the optimizer
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(
             filter(lambda x: x.requires_grad, model.parameters()),
@@ -133,6 +140,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
 
+    # Initialize the loss function
     weights = None
     if args.task_type == "classification":
         if args.weighted_CE:
@@ -149,9 +157,16 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     results = {'highest_valid': min_value, 'final_train': min_value, 'final_test': min_value, 'highest_train': min_value, 'highest_valid_desc': None, "final_train_desc": None, "final_test_desc": None}
     early_stop = 0
     patience = 30
+
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
+    train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
+    train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
+    topk_k = 15
+
+    ########### Train the model for the required epochs ################
+
     for epoch in range(args.start_epoch, args.epochs):
         train_one_epoch_multitask(model=model, optimizer=optimizer, data_loader=train_dataloader, criterion=criterion, weights=weights, device=device, epoch=epoch, task_type=args.task_type)
         train_loss, train_results, train_data_dict = evaluate_on_multitask(model=model, data_loader=train_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
@@ -172,16 +187,33 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         val_f1_list.append(val_f1)
         test_f1_list.append(test_f1)
 
+        # Compute top-15 precision and F1 for train/val/test
+        for split_data_dict, split_labels, prec_list, f1_list in [
+            (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
+            (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
+            (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
+        ]:
+            # Get predicted probabilities and true labels (flatten if multitask)
+            probs = split_data_dict['probs'].flatten() if 'probs' in split_data_dict else np.array([])
+            labels = split_data_dict['labels'].flatten() if 'labels' in split_data_dict else np.array([])
+            if len(probs) > 0 and len(labels) > 0:
+                prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
+            else:
+                prec, f1 = None, None
+            prec_list.append(prec)
+            f1_list.append(f1)
+
         train_result = train_results[eval_metric.upper()]
         valid_result = val_results[eval_metric.upper()]
         test_result = test_results[eval_metric.upper()]
 
-        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result}
+        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result,
+                     f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
+                     f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         print(epoch_log)
+        
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
-        with open(log_file_path, "a") as f:
-            f.write(str(epoch_log) + "\n")
-            f.write("train_results:" + str(train_results) + "\n")
+        output_epoch_results(log_file_path, epoch_log, train_results)
 
         if is_left_better_right(train_result, results['highest_train'], standard=valid_select):
             results['highest_train'] = train_result
@@ -200,33 +232,37 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         for k, v in results.items():
             if isinstance(v, np.generic):
                 results[k] = float(v)
-        if args.save_finetune_ckpt == 1:
-            save_finetune_ckpt(model, optimizer, round(train_loss, 4), epoch, args.log_dir, f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}", lr_scheduler=None, result_dict=results)
+        # Save checkpoint only in the final 2 epochs
+        if args.save_finetune_ckpt == 1 and epoch >= args.epochs - 2:
+            checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
+            save_finetune_ckpt(
+                model, optimizer, round(train_loss, 4), epoch, checkpoint_dir,
+                f"fold{fold+1}_epoch_{epoch}" if fold is not None else f"epoch_{epoch}",
+                lr_scheduler=None, result_dict=results
+            )
 
-    # Plot AUPR and F1 scores
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    epochs = range(args.start_epoch, args.start_epoch + len(train_aupr_list))
-    ax1.plot(epochs, train_aupr_list, label='Train AUPR', color='blue')
-    ax1.plot(epochs, val_aupr_list, label='Val AUPR', color='orange')
-    ax1.plot(epochs, test_aupr_list, label='Test AUPR', color='green')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('AUPR')
-    ax1.legend(loc='upper left')
-
-    ax2 = ax1.twinx()
-    ax2.plot(epochs, train_f1_list, label='Train F1', color='blue', linestyle='dashed')
-    ax2.plot(epochs, val_f1_list, label='Val F1', color='orange', linestyle='dashed')
-    ax2.plot(epochs, test_f1_list, label='Test F1', color='green', linestyle='dashed')
-    ax2.set_ylabel('F1 Score')
-    ax2.legend(loc='upper right')
-
-    plt.title(f"AUPR and F1 over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
-    plot_path = os.path.join(args.log_dir, f"aupr_f1_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_plot.png")
-    plt.savefig(plot_path)
-    plt.close(fig)
+    plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
+    gen_epoch_metric_plot(
+        plot_path,
+        args.start_epoch,
+        train_aupr_list,
+        val_aupr_list,
+        test_aupr_list,
+        train_f1_list,
+        val_f1_list,
+        test_f1_list,
+        train_topk_prec_list,
+        val_topk_prec_list,
+        test_topk_prec_list,
+        train_topk_f1_list,
+        val_topk_f1_list,
+        test_topk_f1_list,
+        topk_k,
+        fold
+    )
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
-    
+
     return results
 
 def main(args):
@@ -313,8 +349,9 @@ def main(args):
         avg_valid = np.mean([r['highest_valid'] for r in fold_results])
         avg_train = np.mean([r['final_train'] for r in fold_results])
         avg_test = np.mean([r['final_test'] for r in fold_results])
-        print(f"\n===== Stratified 5-Fold CV Results =====\nAvg highest_valid: {avg_valid:.3f}, Avg final_train: {avg_train:.3f}, Avg final_test: {avg_test:.3f}")
 
+        final_output_path = os.path.join(args.log_dir, "final_results.txt")
+        output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test, fold_results)
 
 if __name__ == "__main__":
     args = parse_args()
