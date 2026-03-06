@@ -194,8 +194,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
         ]:
             # Get predicted probabilities and true labels (flatten if multitask)
-            probs = split_data_dict['probs'].flatten() if 'probs' in split_data_dict else np.array([])
-            labels = split_data_dict['labels'].flatten() if 'labels' in split_data_dict else np.array([])
+            probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
+            labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
             if len(probs) > 0 and len(labels) > 0:
                 prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
             else:
