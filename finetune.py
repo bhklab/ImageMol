@@ -18,7 +18,10 @@ from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_st
 from model.evaluate import compute_topk_precision_f1
 import yaml
 
-from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results
+from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results, \
+    analyze_split_makeup
+
+
 
 
 def parse_args():
@@ -328,6 +331,9 @@ def main(args):
         elif args.split == "scaffold_balanced":
             smiles = load_smiles(args.txt_file)
             train_idx, val_idx, test_idx = scaffold_split_balanced_train_val_test(list(range(0, len(names))), smiles, frac_train=0.8, frac_valid=0.1, frac_test=0.1, seed=args.seed, balanced=True)
+
+        # log the makeup of the splits in terms of positives and negatives
+        analyze_split_makeup(train_idx, val_idx, test_idx, labels, outpath=os.path.join(args.log_dir, "split_makeup"))
 
         name_train, name_val, name_test, labels_train, labels_val, labels_test = names[train_idx], names[val_idx], names[test_idx], labels[train_idx], labels[val_idx], labels[test_idx]
         run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,

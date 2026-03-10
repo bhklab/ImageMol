@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 """ Utility functions for logging and plotting training metrics. """
 
@@ -73,3 +74,35 @@ def output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test
         for fold, r in enumerate(fold_results):
             f.write(f"Fold {fold+1} results: highest_valid: {r['highest_valid']:.3f}, final_train: {r['final_train']:.3f}, final_test: {r['final_test']:.3f}\n")
             f.write(f"Fold {fold+1} details:\nhighest_valid_desc: {r['highest_valid_desc']}\nfinal_train_desc: {r['final_train_desc']}\nfinal_test_desc: {r['final_test_desc']}\n\n")
+
+# Helper function to analyze the makeup of train, val, test splits in terms of positives and negatives
+def analyze_split_makeup(train_idx, val_idx, test_idx, y, outpath=None):
+    """
+    Analyze the makeup of train, val, test splits in terms of positives and negatives.
+
+    :param train_idx: Indices for the training set.
+    :param val_idx: Indices for the validation set.
+    :param test_idx: Indices for the test set.
+    :param y: Array-like of labels (0/1 or similar).
+    :return: Prints counts for each split.
+    """
+    def count_pos_neg(indices):
+        labels = np.array(y)[indices]
+        n_pos = np.sum(labels == 1)
+        n_neg = np.sum(labels == 0)
+        return n_pos, n_neg
+
+    train_pos, train_neg = count_pos_neg(train_idx)
+    val_pos, val_neg = count_pos_neg(val_idx)
+    test_pos, test_neg = count_pos_neg(test_idx)
+    
+    # output the counts for each split to a file with outpath + "_split_makeup.txt"
+    if outpath:
+        with open(outpath + "_split_makeup.txt", "w") as f:
+            f.write(f"Train: {len(train_idx)} samples | Positives: {train_pos} | Negatives: {train_neg}\n")
+            f.write(f"Val: {len(val_idx)} samples | Positives: {val_pos} | Negatives: {val_neg}\n")
+            f.write(f"Test: {len(test_idx)} samples | Positives: {test_pos} | Negatives: {test_neg}\n")
+    else:
+        print(f"Train: {len(train_idx)} samples | Positives: {train_pos} | Negatives: {train_neg}")
+        print(f"Val: {len(val_idx)} samples | Positives: {val_pos} | Negatives: {val_neg}")
+        print(f"Test: {len(test_idx)} samples | Positives: {test_pos} | Negatives: {test_neg}")
