@@ -44,6 +44,16 @@ def compute_topk_precision_f1(probs, labels, k=15):
     f1 = 2 * precision * recall / (precision + recall + 1e-8) if (precision + recall) > 0 else 0.0
     return precision, f1
 
+
+# function to compute top-k hit rate for binary classification
+def compute_topk_hit_rate(probs, labels, k=15):
+    # probs: numpy array of predicted probabilities for positive class
+    # labels: numpy array of true labels (0 or 1)
+    idx_sorted = np.argsort(-probs)[:k]
+    topk_labels = labels[idx_sorted]
+    hit_rate = np.sum(topk_labels == 1) / np.sum(labels == 1) if np.sum(labels == 1) > 0 else 0.0
+    return hit_rate
+
 def metric_reg(y_true, y_pred):
     '''
     for regression evaluation on single task

@@ -58,6 +58,22 @@ def gen_topkprecf1_plots(plot_path, start_epoch, train_topk_prec_list, val_topk_
     plt.savefig(plot_path.replace('.png', f'_top{topk_k}.png'))
     plt.close(fig_topk)
 
+def gen_topk_hitrate_plot(plot_path, start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold):
+    
+    epochs = range(start_epoch, start_epoch + len(train_topk_hitrate_list))
+
+    # Plot Top-k Hit Rate
+    fig_topk_hit, ax_topk_hit = plt.subplots(figsize=(10, 6))
+    ax_topk_hit.plot(epochs, train_topk_hitrate_list, label=f'Train Top{topk_k} Hit Rate', color='blue')
+    ax_topk_hit.plot(epochs, val_topk_hitrate_list, label=f'Val Top{topk_k} Hit Rate', color='orange')
+    ax_topk_hit.plot(epochs, test_topk_hitrate_list, label=f'Test Top{topk_k} Hit Rate', color='green')
+    ax_topk_hit.set_xlabel('Epoch')
+    ax_topk_hit.set_ylabel(f'Top{topk_k} Hit Rate')
+    ax_topk_hit.legend(loc='upper left')
+    plt.title(f"Top{topk_k} Hit Rate over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
+    plt.savefig(plot_path.replace('.png', f'_top{topk_k}_hitrate.png'))
+    plt.close(fig_topk_hit)
+
 # Function to write epoch log and train results to the log file
 def output_epoch_results(log_file_path, epoch_log, train_results):
     """

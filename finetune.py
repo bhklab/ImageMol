@@ -15,11 +15,11 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
-from model.evaluate import compute_topk_precision_f1
+from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate
 import yaml
 
-from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, output_final_kfold_results, \
-    analyze_split_makeup
+from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
+    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot
 
 
 
@@ -166,7 +166,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     train_f1_list, val_f1_list, test_f1_list = [], [], []
     train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
     train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
-    topk_k = 15
+    train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
+    topk_k = 200
 
     ########### Train the model for the required epochs ################
 
@@ -190,6 +191,20 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         val_f1_list.append(val_f1)
         test_f1_list.append(test_f1)
 
+        # compute the top-k hit rate for train/val/test
+        train_topk_hitrate_list.append(compute_topk_hit_rate(train_data_dict['y_pro'].flatten(), 
+                                                   train_data_dict['y_true'].flatten(), 
+                                                   k=topk_k) if 'y_pro' in train_data_dict \
+                                                   and 'y_true' in train_data_dict else None)
+        val_topk_hitrate_list.append(compute_topk_hit_rate(val_data_dict['y_pro'].flatten(), 
+                                                            val_data_dict['y_true'].flatten(), 
+                                                            k=topk_k) if 'y_pro' in val_data_dict \
+                                                            and 'y_true' in val_data_dict else None)
+        test_topk_hitrate_list.append(compute_topk_hit_rate(test_data_dict['y_pro'].flatten(), 
+                                                             test_data_dict['y_true'].flatten(), 
+                                                             k=topk_k) if 'y_pro' in test_data_dict \
+                                                             and 'y_true' in test_data_dict else None)
+
         # Compute top-15 precision and F1 for train/val/test
         # for split_data_dict, split_labels, prec_list, f1_list in [
         #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
@@ -206,9 +221,14 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         #     prec_list.append(prec)
         #     f1_list.append(f1)
 
-        train_result = train_results[eval_metric.upper()]
-        valid_result = val_results[eval_metric.upper()]
-        test_result = test_results[eval_metric.upper()]
+        if eval_metric == "topk_hitrate":
+            train_result = train_topk_hitrate_list[-1]
+            valid_result = val_topk_hitrate_list[-1]
+            test_result = test_topk_hitrate_list[-1]
+        else:
+            train_result = train_results[eval_metric.upper()]
+            valid_result = val_results[eval_metric.upper()]
+            test_result = test_results[eval_metric.upper()]
 
         epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result,
                      f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
@@ -252,7 +272,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
     # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
     #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
-
+    gen_topk_hitrate_plot(plot_path, args.start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold)
+    
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
 
@@ -281,7 +302,7 @@ def main(args):
 
     ##################################### initialize some parameters #####################################
     if args.task_type == "classification":
-        eval_metric = "aupr"
+        eval_metric = "topk_hitrate"
         valid_select = "max"
         min_value = -np.inf
     elif args.task_type == "regression":
