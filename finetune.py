@@ -164,8 +164,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
-    train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
-    train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
+    # train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
+    # train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
     train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
     topk_k = 200
 
@@ -230,9 +230,10 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             valid_result = val_results[eval_metric.upper()]
             test_result = test_results[eval_metric.upper()]
 
-        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result,
-                     f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
-                     f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
+        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result, \
+                     "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1], f'Test Top{topk_k} Hit Rate': test_topk_hitrate_list[-1]}}
+                    #  f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
+                    #  f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         print(epoch_log)
         
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
