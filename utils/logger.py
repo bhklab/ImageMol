@@ -4,15 +4,8 @@ import numpy as np
 """ Utility functions for logging and plotting training metrics. """
 
 # Function to generate plots for AUPR, F1, Top-k Precision, and Top-k F1 over epochs
-def gen_epoch_metric_plot(plot_path, start_epoch,
-        train_aupr_list, val_aupr_list, test_aupr_list,
-        train_f1_list, val_f1_list, test_f1_list,
-        train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
-        train_topk_f1_list, val_topk_f1_list, test_topk_f1_list,
-        topk_k, fold):
-    """
-    Generate and save the epoch metric plot for AUPR, F1, Top-k Precision, Top-k F1.
-    """
+def gen_AUPR_plot(plot_path, start_epoch,
+        train_aupr_list, val_aupr_list, test_aupr_list, fold):
     epochs = range(start_epoch, start_epoch + len(train_aupr_list))
 
     # Plot AUPR
@@ -27,7 +20,13 @@ def gen_epoch_metric_plot(plot_path, start_epoch,
     plt.savefig(plot_path.replace('.png', '_aupr.png'))
     plt.close(fig_aupr)
 
+
+def gen_F1_plot(plot_path, start_epoch, train_f1_list, val_f1_list, test_f1_list, fold):
+    
+    epochs = range(start_epoch, start_epoch + len(train_f1_list))
+    
     # Plot F1
+
     fig_f1, ax_f1 = plt.subplots(figsize=(10, 6))
     ax_f1.plot(epochs, train_f1_list, label='Train F1', color='blue')
     ax_f1.plot(epochs, val_f1_list, label='Val F1', color='orange')
@@ -38,6 +37,11 @@ def gen_epoch_metric_plot(plot_path, start_epoch,
     plt.title(f"F1 Score over Epochs{' (Fold ' + str(fold+1) + ')' if fold is not None else ''}")
     plt.savefig(plot_path.replace('.png', '_f1.png'))
     plt.close(fig_f1)
+
+def gen_topkprecf1_plots(plot_path, start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
+        train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold):
+    
+    epochs = range(start_epoch, start_epoch + len(train_topk_prec_list))
 
     # Plot Top-k Precision and F1
     fig_topk, ax_topk = plt.subplots(figsize=(10, 6))

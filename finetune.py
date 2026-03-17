@@ -18,7 +18,7 @@ from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_st
 from model.evaluate import compute_topk_precision_f1
 import yaml
 
-from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results, \
+from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, output_final_kfold_results, \
     analyze_split_makeup
 
 
@@ -191,20 +191,20 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         test_f1_list.append(test_f1)
 
         # Compute top-15 precision and F1 for train/val/test
-        for split_data_dict, split_labels, prec_list, f1_list in [
-            (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
-            (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
-            (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
-        ]:
-            # Get predicted probabilities and true labels (flatten if multitask)
-            probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
-            labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
-            if len(probs) > 0 and len(labels) > 0:
-                prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
-            else:
-                prec, f1 = None, None
-            prec_list.append(prec)
-            f1_list.append(f1)
+        # for split_data_dict, split_labels, prec_list, f1_list in [
+        #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
+        #     (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
+        #     (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
+        # ]:
+        #     # Get predicted probabilities and true labels (flatten if multitask)
+        #     probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
+        #     labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
+        #     if len(probs) > 0 and len(labels) > 0:
+        #         prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
+        #     else:
+        #         prec, f1 = None, None
+        #     prec_list.append(prec)
+        #     f1_list.append(f1)
 
         train_result = train_results[eval_metric.upper()]
         valid_result = val_results[eval_metric.upper()]
@@ -245,24 +245,14 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             )
 
     plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
-    gen_epoch_metric_plot(
-        plot_path,
-        args.start_epoch,
-        train_aupr_list,
-        val_aupr_list,
-        test_aupr_list,
-        train_f1_list,
-        val_f1_list,
-        test_f1_list,
-        train_topk_prec_list,
-        val_topk_prec_list,
-        test_topk_prec_list,
-        train_topk_f1_list,
-        val_topk_f1_list,
-        test_topk_f1_list,
-        topk_k,
-        fold
-    )
+    
+    # Plot the metrics over epochs
+    gen_AUPR_plot(plot_path, args.start_epoch, train_aupr_list, val_aupr_list, test_aupr_list,
+                  fold)
+    # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
+    # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
+    #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
+
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
 
