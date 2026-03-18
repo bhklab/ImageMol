@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument('--weighted_CE', action='store_true', default=False, help='whether to use global imbalanced weight')
     parser.add_argument('--task_type', type=str, default="classification", choices=["classification", "regression"], help='task type')
     parser.add_argument('--save_finetune_ckpt', type=int, default=1, choices=[0, 1], help='1 represents saving best ckpt, 0 represents no saving best ckpt')
+    parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate before the classifier layer (default: 0.5)')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -95,7 +96,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # train the model
-    model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks)
+    model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks, dropout_rate=args.dropout_rate)
     if args.resume and fold is None:
         if os.path.isfile(args.resume):
             print(f"=> loading checkpoint '{args.resume}'")
