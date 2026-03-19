@@ -15,10 +15,13 @@ from model.train_utils import fix_train_random_seed, load_smiles
 from utils.public_utils import cal_torch_model_params, setup_device, is_left_better_right
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
-from model.evaluate import compute_topk_precision_f1
+from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate
 import yaml
 
-from utils.logger import output_epoch_results, gen_epoch_metric_plot, output_final_kfold_results
+from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
+    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot
+
+
 
 
 def parse_args():
@@ -59,6 +62,7 @@ def parse_args():
     parser.add_argument('--weighted_CE', action='store_true', default=False, help='whether to use global imbalanced weight')
     parser.add_argument('--task_type', type=str, default="classification", choices=["classification", "regression"], help='task type')
     parser.add_argument('--save_finetune_ckpt', type=int, default=1, choices=[0, 1], help='1 represents saving best ckpt, 0 represents no saving best ckpt')
+    parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate before the classifier layer (default: 0.5)')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -92,7 +96,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # train the model
-    model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks)
+    model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks, dropout_rate=args.dropout_rate)
     if args.resume and fold is None:
         if os.path.isfile(args.resume):
             print(f"=> loading checkpoint '{args.resume}'")
@@ -161,9 +165,10 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
-    train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
-    train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
-    topk_k = 15
+    # train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
+    # train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
+    train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
+    topk_k = 200
 
     ########### Train the model for the required epochs ################
 
@@ -187,29 +192,49 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         val_f1_list.append(val_f1)
         test_f1_list.append(test_f1)
 
+        # compute the top-k hit rate for train/val/test
+        train_topk_hitrate_list.append(compute_topk_hit_rate(train_data_dict['y_pro'].flatten(), 
+                                                   train_data_dict['y_true'].flatten(), 
+                                                   k=topk_k) if 'y_pro' in train_data_dict \
+                                                   and 'y_true' in train_data_dict else None)
+        val_topk_hitrate_list.append(compute_topk_hit_rate(val_data_dict['y_pro'].flatten(), 
+                                                            val_data_dict['y_true'].flatten(), 
+                                                            k=topk_k) if 'y_pro' in val_data_dict \
+                                                            and 'y_true' in val_data_dict else None)
+        test_topk_hitrate_list.append(compute_topk_hit_rate(test_data_dict['y_pro'].flatten(), 
+                                                             test_data_dict['y_true'].flatten(), 
+                                                             k=topk_k) if 'y_pro' in test_data_dict \
+                                                             and 'y_true' in test_data_dict else None)
+
         # Compute top-15 precision and F1 for train/val/test
-        for split_data_dict, split_labels, prec_list, f1_list in [
-            (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
-            (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
-            (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
-        ]:
-            # Get predicted probabilities and true labels (flatten if multitask)
-            probs = split_data_dict['probs'].flatten() if 'probs' in split_data_dict else np.array([])
-            labels = split_data_dict['labels'].flatten() if 'labels' in split_data_dict else np.array([])
-            if len(probs) > 0 and len(labels) > 0:
-                prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
-            else:
-                prec, f1 = None, None
-            prec_list.append(prec)
-            f1_list.append(f1)
+        # for split_data_dict, split_labels, prec_list, f1_list in [
+        #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
+        #     (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
+        #     (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
+        # ]:
+        #     # Get predicted probabilities and true labels (flatten if multitask)
+        #     probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
+        #     labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
+        #     if len(probs) > 0 and len(labels) > 0:
+        #         prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
+        #     else:
+        #         prec, f1 = None, None
+        #     prec_list.append(prec)
+        #     f1_list.append(f1)
 
-        train_result = train_results[eval_metric.upper()]
-        valid_result = val_results[eval_metric.upper()]
-        test_result = test_results[eval_metric.upper()]
+        if eval_metric == "topk_hitrate":
+            train_result = train_topk_hitrate_list[-1]
+            valid_result = val_topk_hitrate_list[-1]
+            test_result = test_topk_hitrate_list[-1]
+        else:
+            train_result = train_results[eval_metric.upper()]
+            valid_result = val_results[eval_metric.upper()]
+            test_result = test_results[eval_metric.upper()]
 
-        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result,
-                     f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
-                     f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
+        epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result, \
+                     "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1], f'Test Top{topk_k} Hit Rate': test_topk_hitrate_list[-1]}}
+                    #  f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
+                    #  f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         print(epoch_log)
         
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
@@ -242,24 +267,15 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             )
 
     plot_path = os.path.join(args.log_dir, f"aupr_f1_topk_plot_fold{fold+1}.png" if fold is not None else "aupr_f1_topk_plot.png")
-    gen_epoch_metric_plot(
-        plot_path,
-        args.start_epoch,
-        train_aupr_list,
-        val_aupr_list,
-        test_aupr_list,
-        train_f1_list,
-        val_f1_list,
-        test_f1_list,
-        train_topk_prec_list,
-        val_topk_prec_list,
-        test_topk_prec_list,
-        train_topk_f1_list,
-        val_topk_f1_list,
-        test_topk_f1_list,
-        topk_k,
-        fold
-    )
+    
+    # Plot the metrics over epochs
+    gen_AUPR_plot(plot_path, args.start_epoch, train_aupr_list, val_aupr_list, test_aupr_list,
+                  fold)
+    # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
+    # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
+    #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
+    gen_topk_hitrate_plot(plot_path, args.start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold)
+    
 
     print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
 
@@ -288,7 +304,7 @@ def main(args):
 
     ##################################### initialize some parameters #####################################
     if args.task_type == "classification":
-        eval_metric = "aupr"
+        eval_metric = "topk_hitrate"
         valid_select = "max"
         min_value = -np.inf
     elif args.task_type == "regression":
@@ -328,6 +344,9 @@ def main(args):
         elif args.split == "scaffold_balanced":
             smiles = load_smiles(args.txt_file)
             train_idx, val_idx, test_idx = scaffold_split_balanced_train_val_test(list(range(0, len(names))), smiles, frac_train=0.8, frac_valid=0.1, frac_test=0.1, seed=args.seed, balanced=True)
+
+        # log the makeup of the splits in terms of positives and negatives
+        analyze_split_makeup(train_idx, val_idx, test_idx, labels, outpath=os.path.join(args.log_dir, "split_makeup"))
 
         name_train, name_val, name_test, labels_train, labels_val, labels_test = names[train_idx], names[val_idx], names[test_idx], labels[train_idx], labels[val_idx], labels[test_idx]
         run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
