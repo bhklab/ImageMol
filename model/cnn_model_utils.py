@@ -38,6 +38,30 @@ def load_model(modelname="ResNet18", imageSize=224, num_classes=2, dropout_rate=
     return model
 
 
+def _set_bn_eval_and_freeze_affine(module):
+    for submodule in module.modules():
+        if isinstance(submodule, torch.nn.modules.batchnorm._BatchNorm):
+            submodule.eval()
+            if submodule.affine:
+                submodule.weight.requires_grad = False
+                submodule.bias.requires_grad = False
+
+
+def _freeze_resnet_bn_stages(model, freeze_layers):
+    if not freeze_layers:
+        return
+    target_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    _set_bn_eval_and_freeze_affine(target_model.bn1)
+    if freeze_layers >= 1:
+        _set_bn_eval_and_freeze_affine(target_model.layer1)
+    if freeze_layers >= 2:
+        _set_bn_eval_and_freeze_affine(target_model.layer2)
+    if freeze_layers >= 3:
+        _set_bn_eval_and_freeze_affine(target_model.layer3)
+    if freeze_layers >= 4:
+        _set_bn_eval_and_freeze_affine(target_model.layer4)
+
+
 # evaluation for classification
 # def metric(y_true, y_pred, y_prob):
 #     acc = metrics.accuracy_score(y_true, y_pred)
@@ -66,7 +90,7 @@ def load_model(modelname="ResNet18", imageSize=224, num_classes=2, dropout_rate=
 #     }
 
 
-def train_one_epoch_multitask(model, optimizer, data_loader, criterion, weights, device, epoch, task_type):
+def train_one_epoch_multitask(model, optimizer, data_loader, criterion, weights, device, epoch, task_type, freeze_layers=0):
     '''
     :param model:
     :param optimizer:
@@ -80,6 +104,8 @@ def train_one_epoch_multitask(model, optimizer, data_loader, criterion, weights,
     assert task_type in ["classification", "regression"]
 
     model.train()
+    # Keep BatchNorm stats fixed in frozen backbone stages.
+    _freeze_resnet_bn_stages(model, freeze_layers)
     accu_loss = torch.zeros(1).to(device)
     optimizer.zero_grad()
 

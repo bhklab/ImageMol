@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument('--task_type', type=str, default="classification", choices=["classification", "regression"], help='task type')
     parser.add_argument('--save_finetune_ckpt', type=int, default=1, choices=[0, 1], help='1 represents saving best ckpt, 0 represents no saving best ckpt')
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate before the classifier layer (default: 0.5)')
+    parser.add_argument('--freeze_layers', type=int, choices=[0, 1, 2, 3, 4], default=0, help='how many embedding layers to freeze')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -125,6 +126,30 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             print(f"=> no checkpoint found at '{args.resume}'")
     print(model)
     print(f"params: {cal_torch_model_params(model)}")
+
+    # freeze the embedding layers according to the freeze_layers parameter
+    if args.freeze_layers:
+        # Freeze stem + first N residual layers
+        freeze_stages = args.freeze_layers
+        # stem
+        for p in model.conv1.parameters():
+            p.requires_grad = False
+        for p in model.bn1.parameters():
+            p.requires_grad = False
+
+        if freeze_stages >= 1:
+            for p in model.layer1.parameters():
+                p.requires_grad = False
+        if freeze_stages >= 2:
+            for p in model.layer2.parameters():
+                p.requires_grad = False
+        if freeze_stages >= 3:
+            for p in model.layer3.parameters():
+                p.requires_grad = False
+        if freeze_stages >= 4:
+            for p in model.layer4.parameters():
+                p.requires_grad = False
+
     if torch.cuda.is_available():
         model = model.cuda()
     if len(device_ids) > 1:
@@ -191,7 +216,17 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     ########### Train the model for the required epochs ################
 
     for epoch in range(args.start_epoch, args.epochs):
-        train_one_epoch_multitask(model=model, optimizer=optimizer, data_loader=train_dataloader, criterion=criterion, weights=weights, device=device, epoch=epoch, task_type=args.task_type)
+        train_one_epoch_multitask(
+            model=model,
+            optimizer=optimizer,
+            data_loader=train_dataloader,
+            criterion=criterion,
+            weights=weights,
+            device=device,
+            epoch=epoch,
+            task_type=args.task_type,
+            freeze_layers=args.freeze_layers,
+        )
         train_loss, train_results, train_data_dict = evaluate_on_multitask(model=model, data_loader=train_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         val_loss, val_results, val_data_dict = evaluate_on_multitask(model=model, data_loader=val_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         
