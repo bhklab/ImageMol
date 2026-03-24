@@ -12,7 +12,8 @@ def gen_AUPR_plot(plot_path, start_epoch,
     fig_aupr, ax_aupr = plt.subplots(figsize=(10, 6))
     ax_aupr.plot(epochs, train_aupr_list, label='Train AUPR', color='blue')
     ax_aupr.plot(epochs, val_aupr_list, label='Val AUPR', color='orange')
-    ax_aupr.plot(epochs, test_aupr_list, label='Test AUPR', color='green')
+    if test_aupr_list != []:
+        ax_aupr.plot(epochs, test_aupr_list, label='Test AUPR', color='green')
     ax_aupr.set_xlabel('Epoch')
     ax_aupr.set_ylabel('AUPR')
     ax_aupr.legend(loc='upper left')
@@ -30,7 +31,8 @@ def gen_F1_plot(plot_path, start_epoch, train_f1_list, val_f1_list, test_f1_list
     fig_f1, ax_f1 = plt.subplots(figsize=(10, 6))
     ax_f1.plot(epochs, train_f1_list, label='Train F1', color='blue')
     ax_f1.plot(epochs, val_f1_list, label='Val F1', color='orange')
-    ax_f1.plot(epochs, test_f1_list, label='Test F1', color='green')
+    if test_f1_list != []:
+        ax_f1.plot(epochs, test_f1_list, label='Test F1', color='green')
     ax_f1.set_xlabel('Epoch')
     ax_f1.set_ylabel('F1 Score')
     ax_f1.legend(loc='upper left')
@@ -47,10 +49,12 @@ def gen_topkprecf1_plots(plot_path, start_epoch, train_topk_prec_list, val_topk_
     fig_topk, ax_topk = plt.subplots(figsize=(10, 6))
     ax_topk.plot(epochs, train_topk_prec_list, label=f'Train Top{topk_k} Prec', color='blue', linestyle='dotted')
     ax_topk.plot(epochs, val_topk_prec_list, label=f'Val Top{topk_k} Prec', color='orange', linestyle='dotted')
-    ax_topk.plot(epochs, test_topk_prec_list, label=f'Test Top{topk_k} Prec', color='green', linestyle='dotted')
+    if test_topk_prec_list != []:
+        ax_topk.plot(epochs, test_topk_prec_list, label=f'Test Top{topk_k} Prec', color='green', linestyle='dotted')
     ax_topk.plot(epochs, train_topk_f1_list, label=f'Train Top{topk_k} F1', color='blue', linestyle='dashdot')
     ax_topk.plot(epochs, val_topk_f1_list, label=f'Val Top{topk_k} F1', color='orange', linestyle='dashdot')
-    ax_topk.plot(epochs, test_topk_f1_list, label=f'Test Top{topk_k} F1', color='green', linestyle='dashdot')
+    if test_topk_f1_list != []:
+        ax_topk.plot(epochs, test_topk_f1_list, label=f'Test Top{topk_k} F1', color='green', linestyle='dashdot')
     ax_topk.set_xlabel('Epoch')
     ax_topk.set_ylabel(f'Top{topk_k} Precision / F1')
     ax_topk.legend(loc='upper left')
@@ -66,7 +70,8 @@ def gen_topk_hitrate_plot(plot_path, start_epoch, train_topk_hitrate_list, val_t
     fig_topk_hit, ax_topk_hit = plt.subplots(figsize=(10, 6))
     ax_topk_hit.plot(epochs, train_topk_hitrate_list, label=f'Train Top{topk_k} Hit Rate', color='blue')
     ax_topk_hit.plot(epochs, val_topk_hitrate_list, label=f'Val Top{topk_k} Hit Rate', color='orange')
-    ax_topk_hit.plot(epochs, test_topk_hitrate_list, label=f'Test Top{topk_k} Hit Rate', color='green')
+    if test_topk_hitrate_list != []:
+        ax_topk_hit.plot(epochs, test_topk_hitrate_list, label=f'Test Top{topk_k} Hit Rate', color='green')
     ax_topk_hit.set_xlabel('Epoch')
     ax_topk_hit.set_ylabel(f'Top{topk_k} Hit Rate')
     ax_topk_hit.legend(loc='upper left')

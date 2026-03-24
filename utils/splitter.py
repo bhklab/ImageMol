@@ -7,6 +7,8 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
+import os
+import pandas as pd
 
 
 def generate_scaffold(smiles, include_chirality=False):
@@ -252,3 +254,16 @@ def scaffold_split_balanced_train_val_test(index, smiles_list,
     test_idx = index[test]
 
     return train_idx, val_idx, test_idx
+
+def load_existing_k_fold_split(split_type):
+    splits = []
+    
+    for fold in range(5):
+        train_csv = os.path.join("split_csvs/", f"{split_type}", f"fold_{fold + 1}_train_idx.csv")
+        test_csv = os.path.join("split_csvs/", f"{split_type}", f"fold_{fold + 1}_test_idx.csv")
+        train_idx = pd.read_csv(train_csv, header=0).iloc[:, 0].tolist()
+        test_idx = pd.read_csv(test_csv, header=0).iloc[:, 0].tolist()
+        splits.append((train_idx, test_idx, []))
+
+    return splits
+    
