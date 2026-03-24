@@ -50,7 +50,9 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help='random seed (default: 42) to split dataset')
     parser.add_argument('--runseed', type=int, default=2021, help='random seed to run model (default: 2021)')
     parser.add_argument('--split', default="random", type=str,
-                        choices=['random', 'stratified', 'scaffold', 'random_scaffold', 'scaffold_balanced', 'stratified-k-fold', 'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold'],
+                        choices=['random', 'stratified', 'scaffold', 'random_scaffold', 'scaffold_balanced', 
+                                 'stratified-k-fold', 'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold',
+                                  'random-k-fold', 'random200-k-fold'],
                         help='regularization of classification loss')
     parser.add_argument('--epochs', type=int, default=100, help='number of total epochs to run (default: 100)')
     parser.add_argument('--start_epoch', default=0, type=int, help='manual epoch number (useful on restarts) (default: 0)')
@@ -82,7 +84,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                       img_transformer_train, img_transformer_test, fold=None):
     
     # var if we are doing k fold with predefined splits, to distinguish from single split scenario in the logs and outputs
-    has_test = args.split not in {'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold'}
+    has_test = args.split not in {'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold', 'random-k-fold', 'random200-k-fold'}
     
     # make the datasets and dataloaders according to the fold indices
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -441,6 +443,10 @@ def main(args):
             splits = load_existing_k_fold_split('butina')
         elif args.split == "agglo-k-fold":
             splits = load_existing_k_fold_split('agglo')
+        elif args.split == "random-k-fold":
+            splits = load_existing_k_fold_split('random')
+        elif args.split == "random200-k-fold":
+            splits = load_existing_k_fold_split('random200')
         fold_results = []
         for fold, (train_idx, val_idx, test_idx) in enumerate(splits):
             print(f"\n===== Fold {fold+1}/5 =====")
