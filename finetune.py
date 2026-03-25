@@ -42,9 +42,14 @@ def parse_args():
 
     # optimizer
     parser.add_argument('--lr', default=0.01, type=float, help='learning rate (default: 0.01)')
+    parser.add_argument('--backbone_lr_ratio', default=0.1, type=float,
+                        help='backbone lr = lr * backbone_lr_ratio (default: 0.1)')
     parser.add_argument('--weight_decay', default=-5, type=float, help='weight decay pow (default: -5)')
     parser.add_argument('--momentum', default=0.9, type=float, help='moment um (default: 0.9)')
     parser.add_argument('--optimizer', default='sgd', type=str, choices=['sgd', 'adam', 'adamw'], help='optimizer type (sgd, adam, adamw)')
+    parser.add_argument('--lr_scheduler', default='cosine', type=str, choices=['cosine', 'step', 'none'], help='learning rate scheduler type (cosine, step, none)')
+    parser.add_argument('--lr_step_size', default=1, type=int, help='step size for StepLR in epochs (default: 1)')
+    parser.add_argument('--lr_gamma', default=0.1, type=float, help='gamma for StepLR (default: 0.1)')
 
     # train
     parser.add_argument('--seed', type=int, default=42, help='random seed (default: 42) to split dataset')
@@ -157,28 +162,61 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     if len(device_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
 
-    # Initialize the optimizer
+    # Initialize optimizer with differential LR:
+    # - head (fc/classifier): args.lr
+    # - backbone: args.lr * args.backbone_lr_ratio
+    # Frozen params are excluded by checking requires_grad.
+    head_prefixes = (
+        "fc.", "module.fc.",
+        "classifier.", "module.classifier.",
+        "head.", "module.head.",
+    )
+    head_params, backbone_params = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith(head_prefixes):
+            head_params.append(param)
+        else:
+            backbone_params.append(param)
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": args.lr * args.backbone_lr_ratio})
+    if head_params:
+        param_groups.append({"params": head_params, "lr": args.lr})
+
+    if not param_groups:
+        raise ValueError("No trainable parameters found. Check freeze settings.")
+
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(
-            filter(lambda x: x.requires_grad, model.parameters()),
-            lr=args.lr,
+            param_groups,
             momentum=args.momentum,
             weight_decay=10 ** args.weight_decay
         )
     elif args.optimizer == 'adam':
         optimizer = torch.optim.Adam(
-            filter(lambda x: x.requires_grad, model.parameters()),
-            lr=args.lr,
+            param_groups,
             weight_decay=10 ** args.weight_decay
         )
     elif args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(
-            filter(lambda x: x.requires_grad, model.parameters()),
-            lr=args.lr,
+            param_groups,
             weight_decay=10 ** args.weight_decay
         )
     else:
         raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
+
+    # initialize the scheduler
+
+    if args.lr_scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    elif args.lr_scheduler == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    else:
+        scheduler = None
 
     # Initialize the loss function
     weights = None
@@ -229,6 +267,9 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
             task_type=args.task_type,
             freeze_layers=args.freeze_layers,
         )
+        if scheduler is not None:
+            scheduler.step()
+
         train_loss, train_results, train_data_dict = evaluate_on_multitask(model=model, data_loader=train_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         val_loss, val_results, val_data_dict = evaluate_on_multitask(model=model, data_loader=val_dataloader, criterion=criterion, device=device, epoch=epoch, task_type=args.task_type, return_data_dict=True)
         
@@ -400,7 +441,14 @@ def main(args):
 
     ##################################### load data #####################################
     if args.image_aug:
-        img_transformer_train = [transforms.CenterCrop(args.imageSize), transforms.RandomGrayscale(p=0.2), transforms.RandomRotation(degrees=360), transforms.RandomHorizontalFlip(), transforms.ToTensor()]
+        img_transformer_train = [transforms.CenterCrop(args.imageSize), 
+                                 transforms.RandomGrayscale(p=0.2), 
+                                 transforms.RandomRotation(degrees=360), 
+                                 transforms.RandomHorizontalFlip(), 
+                                 transforms.RandomVerticalFlip(), # new
+                                 transforms.RandomResizedCrop(args.imageSize, scale=(0.8, 1.0)), # new
+                                 transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)), # new
+                                 transforms.ToTensor()]
     else:
         img_transformer_train = [transforms.CenterCrop(args.imageSize), transforms.ToTensor()]
     img_transformer_test = [transforms.CenterCrop(args.imageSize), transforms.ToTensor()]
@@ -408,7 +456,7 @@ def main(args):
     names, labels = np.array(names), np.array(labels)
     num_tasks = labels.shape[1]
     
-    kfold_splits = {'stratified-k-fold', 'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold'}
+    kfold_splits = {'stratified-k-fold', 'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold', 'random-k-fold', 'random200-k-fold'}
 
     if args.split not in kfold_splits:
         # Single split
