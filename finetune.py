@@ -447,8 +447,8 @@ def main(args):
                                  transforms.RandomHorizontalFlip(), 
                                  transforms.RandomVerticalFlip(), # new
                                  transforms.RandomResizedCrop(args.imageSize, scale=(0.8, 1.0)), # new
-                                 transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)), # new
-                                 transforms.ToTensor()]
+                                 transforms.ToTensor(),
+                                 transforms.RandomErasing(p=0.3, scale=(0.02, 0.15))] # new
     else:
         img_transformer_train = [transforms.CenterCrop(args.imageSize), transforms.ToTensor()]
     img_transformer_test = [transforms.CenterCrop(args.imageSize), transforms.ToTensor()]
