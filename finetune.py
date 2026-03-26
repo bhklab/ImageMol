@@ -10,6 +10,7 @@ import torch.utils.data
 import torchvision.transforms as transforms
 from torchvision.ops import sigmoid_focal_loss
 from dataloader.image_dataloader import ImageDataset, load_filenames_and_labels_multitask, get_datasets
+from dataloader.fingerprint_dataloader import get_ecfp4_fingerprints
 from dataloader.balanced_sampler import BalancedBatchSampler
 from model.cnn_model_utils import load_model, train_one_epoch_multitask, evaluate_on_multitask, save_finetune_ckpt
 from model.train_utils import fix_train_random_seed, load_smiles
@@ -17,7 +18,7 @@ from utils.public_utils import cal_torch_model_params, setup_device, is_left_bet
 from utils.splitter import split_train_val_test_idx, split_train_val_test_idx_stratified, scaffold_split_train_val_test, \
     random_scaffold_split_train_val_test, scaffold_split_balanced_train_val_test, stratified_k_fold_split_train_val_test
 from utils.splitter import load_existing_k_fold_split
-from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate
+from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate, metric_multitask
 import yaml
 
 from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
@@ -75,6 +76,10 @@ def parse_args():
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate before the classifier layer (default: 0.5)')
     parser.add_argument('--freeze_layers', type=int, choices=[0, 1, 2, 3, 4], default=0, help='how many embedding layers to freeze')
 
+    # lgbm baseline
+    parser.add_argument('--lgbm', type=int, default=0, choices=[0, 1], help='whether to run LGBM baseline using ECFP4 fingerprints')
+    parser.add_argument('--data_type', type=str, default='processed', help='data type path level used for fingerprint parquet in bucket path')
+
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
     parser.add_argument('--run_num', type=int, default=0, help='unique run number for output folder, if not specified, will use 0')
@@ -84,9 +89,124 @@ def parse_args():
     args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
     return args
 
+
+def run_lgbm_fold(args, labels_train, labels_val, labels_test,
+                  fp_train, fp_val, fp_test, has_test, fold=None):
+    if args.task_type != "classification":
+        print("Skipping LGBM baseline because it currently supports classification only.")
+        return None
+
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError as exc:
+        raise ImportError("LightGBM is not installed. Install 'lightgbm' to use --lgbm 1.") from exc
+
+    fp_train = np.asarray(fp_train, dtype=np.float32)
+    fp_val = np.asarray(fp_val, dtype=np.float32)
+    fp_test = np.asarray(fp_test, dtype=np.float32) if has_test else None
+
+    num_tasks = labels_train.shape[1]
+    y_pro_train = np.full((labels_train.shape[0], num_tasks), 0.5, dtype=np.float32)
+    y_pro_val = np.full((labels_val.shape[0], num_tasks), 0.5, dtype=np.float32)
+    y_pred_train = np.zeros((labels_train.shape[0], num_tasks), dtype=np.int32)
+    y_pred_val = np.zeros((labels_val.shape[0], num_tasks), dtype=np.int32)
+
+    if has_test:
+        y_pro_test = np.full((labels_test.shape[0], num_tasks), 0.5, dtype=np.float32)
+        y_pred_test = np.zeros((labels_test.shape[0], num_tasks), dtype=np.int32)
+
+    for task_idx in range(num_tasks):
+        y_task = labels_train[:, task_idx]
+        valid = y_task != -1
+        valid_classes = np.unique(y_task[valid]) if np.any(valid) else np.array([])
+        if len(valid_classes) < 2:
+            continue
+        
+        # best seen parameters for now, can be exposed as args if desired
+        lgbm = LGBMClassifier(
+            n_estimators=3000,
+            learning_rate=0.02,
+            num_leaves=31,
+            min_child_samples=100,
+            subsample=0.7,
+            subsample_freq=1,
+            colsample_bytree=0.6,
+            reg_alpha=0.5,
+            reg_lambda=5.0
+        )
+        lgbm.fit(fp_train[valid], y_task[valid])
+
+        train_proba = lgbm.predict_proba(fp_train)[:, 1]
+        val_proba = lgbm.predict_proba(fp_val)[:, 1]
+        y_pro_train[:, task_idx] = train_proba
+        y_pro_val[:, task_idx] = val_proba
+        y_pred_train[:, task_idx] = (train_proba > 0.5).astype(np.int32)
+        y_pred_val[:, task_idx] = (val_proba > 0.5).astype(np.int32)
+
+        if has_test:
+            test_proba = lgbm.predict_proba(fp_test)[:, 1]
+            y_pro_test[:, task_idx] = test_proba
+            y_pred_test[:, task_idx] = (test_proba > 0.5).astype(np.int32)
+
+    train_results = metric_multitask(labels_train, y_pred_train, y_pro_train, num_tasks=num_tasks, empty=-1)
+    val_results = metric_multitask(labels_val, y_pred_val, y_pro_val, num_tasks=num_tasks, empty=-1)
+    topk_k = 200
+
+    train_topk_hitrate = compute_topk_hit_rate(y_pro_train.flatten(), labels_train.flatten(), k=topk_k)
+    val_topk_hitrate = compute_topk_hit_rate(y_pro_val.flatten(), labels_val.flatten(), k=topk_k)
+
+    if has_test:
+        test_results = metric_multitask(labels_test, y_pred_test, y_pro_test, num_tasks=num_tasks, empty=-1)
+        test_topk_hitrate = compute_topk_hit_rate(y_pro_test.flatten(), labels_test.flatten(), k=topk_k)
+
+    lgbm_log = {
+        "fold": fold + 1 if fold is not None else None,
+        "model": "lgbm",
+        "Train AUPR": train_results.get("AUPR"),
+        "Validation AUPR": val_results.get("AUPR"),
+        "topk_hitrate": {
+            f"Train Top{topk_k} Hit Rate": train_topk_hitrate,
+            f"Val Top{topk_k} Hit Rate": val_topk_hitrate,
+        },
+    }
+    if has_test:
+        lgbm_log["Test AUPR"] = test_results.get("AUPR")
+        lgbm_log["topk_hitrate"][f"Test Top{topk_k} Hit Rate"] = test_topk_hitrate
+
+    print(lgbm_log)
+    lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_fold{fold+1}.txt" if fold is not None else "training_log_lgbm.txt")
+    output_epoch_results(lgbm_log_file, lgbm_log, train_results)
+
+    lgbm_plot_path = os.path.join(args.log_dir, f"lgbm_plot_fold{fold+1}.png" if fold is not None else "lgbm_plot.png")
+    if has_test:
+        gen_AUPR_plot(lgbm_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [test_results.get("AUPR")], fold)
+        gen_topk_hitrate_plot(lgbm_plot_path, 0, [train_topk_hitrate], [val_topk_hitrate], [test_topk_hitrate], topk_k, fold)
+    else:
+        gen_AUPR_plot(lgbm_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [], fold)
+        gen_topk_hitrate_plot(lgbm_plot_path, 0, [train_topk_hitrate], [val_topk_hitrate], [], topk_k, fold)
+
+    lgbm_results = {
+        "highest_valid": val_results.get("AUPR"),
+        "final_train": train_results.get("AUPR"),
+        "final_test": test_results.get("AUPR") if has_test else None,
+        "highest_valid_desc": val_results,
+        "final_train_desc": train_results,
+        "final_test_desc": test_results if has_test else None,
+    }
+    return lgbm_results
+
+
+def _extract_fp_features(ecfp4_pairs, indices):
+    """Extract fingerprint vectors from object rows shaped as [fingerprint, label]."""
+    selected = ecfp4_pairs[indices]
+    if selected.ndim != 2 or selected.shape[1] < 1:
+        raise ValueError("Expected ecfp4 pairs shaped (n, 2) as [[fingerprint, label], ...].")
+    return np.vstack(selected[:, 0]).astype(np.float32)
+
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
-                      img_transformer_train, img_transformer_test, fold=None):
+                      img_transformer_train, img_transformer_test, fold=None,
+                      fp_train=None, fp_val=None, fp_test=None):
     
     # var if we are doing k fold with predefined splits, to distinguish from single split scenario in the logs and outputs
     has_test = args.split not in {'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold', 'random-k-fold', 'random200-k-fold'}
@@ -111,6 +231,22 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
     if has_test:
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
+
+    lgbm_results = None
+    if args.lgbm:
+        if fp_train is None or fp_val is None or (has_test and fp_test is None):
+            raise ValueError("LGBM is enabled but fingerprint arrays are missing for this fold.")
+        lgbm_results = run_lgbm_fold(
+            args=args,
+            labels_train=labels_train,
+            labels_val=labels_val,
+            labels_test=labels_test,
+            fp_train=fp_train,
+            fp_val=fp_val,
+            fp_test=fp_test,
+            has_test=has_test,
+            fold=fold,
+        )
 
     # train the model
     model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks, dropout_rate=args.dropout_rate)
@@ -399,7 +535,12 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
     else:
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}".format(results["highest_valid"], results["final_train"]))
+
+    if lgbm_results is not None:
+        results["lgbm_results"] = lgbm_results
     return results
+
+### MAIN FUNCTION ###
 
 def main(args):
     if not os.path.exists(args.log_dir):
@@ -409,6 +550,9 @@ def main(args):
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     args.image_folder, args.txt_file = get_datasets(args.dataset, args.dataroot, data_type="processed", bucket_name=args.bucket_name)
+
+    if args.lgbm:
+        args.ecfp4 = get_ecfp4_fingerprints(args.dataset, args.dataroot, args.data_type, args.bucket_name)
 
     if torch.cuda.is_available():
         device, device_ids = setup_device(args.ngpu)
@@ -478,9 +622,13 @@ def main(args):
         analyze_split_makeup(train_idx, val_idx, test_idx, labels, outpath=os.path.join(args.log_dir, "split_makeup"))
 
         name_train, name_val, name_test, labels_train, labels_val, labels_test = names[train_idx], names[val_idx], names[test_idx], labels[train_idx], labels[val_idx], labels[test_idx]
+        fp_train = _extract_fp_features(args.ecfp4, train_idx) if args.lgbm else None
+        fp_val = _extract_fp_features(args.ecfp4, val_idx) if args.lgbm else None
+        fp_test = _extract_fp_features(args.ecfp4, test_idx) if (args.lgbm and len(test_idx) > 0) else None
         run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                          name_train, labels_train, name_val, labels_val, name_test, labels_test,
-                         img_transformer_train, img_transformer_test)
+                 img_transformer_train, img_transformer_test,
+                 fp_train=fp_train, fp_val=fp_val, fp_test=fp_test)
     else:
         # k-fold branch
         if args.split == "stratified-k-fold":
@@ -506,9 +654,13 @@ def main(args):
 
             name_train, name_val, name_test = names[train_idx], names[val_idx], names[test_idx]
             labels_train, labels_val, labels_test = labels[train_idx], labels[val_idx], labels[test_idx]
+            fp_train = _extract_fp_features(args.ecfp4, train_idx) if args.lgbm else None
+            fp_val = _extract_fp_features(args.ecfp4, val_idx) if args.lgbm else None
+            fp_test = _extract_fp_features(args.ecfp4, test_idx) if (args.lgbm and len(test_idx) > 0) else None
             result = run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
-                                      img_transformer_train, img_transformer_test, fold=fold)
+                                      img_transformer_train, img_transformer_test, fold=fold,
+                                      fp_train=fp_train, fp_val=fp_val, fp_test=fp_test)
             fold_results.append(result)
         # Aggregate results across folds
         avg_valid = np.mean([r['highest_valid'] for r in fold_results])

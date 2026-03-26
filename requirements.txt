@@ -4,6 +4,8 @@ einops
 networkx
 torch-geometric
 pandas
+pyarrow
 numpy
 google-cloud-storage
 pyyaml
+lightgbm
