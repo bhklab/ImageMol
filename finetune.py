@@ -1,5 +1,6 @@
 import argparse
 import os
+import pickle
 from collections import Counter
 import numpy as np
 import torch
@@ -22,8 +23,7 @@ from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate, met
 import yaml
 
 from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
-    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot
-
+    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot, gen_fold_validation_bars
 
 
 
@@ -79,6 +79,7 @@ def parse_args():
     # lgbm baseline
     parser.add_argument('--lgbm', type=int, default=0, choices=[0, 1], help='whether to run LGBM baseline using ECFP4 fingerprints')
     parser.add_argument('--data_type', type=str, default='processed', help='data type path level used for fingerprint parquet in bucket path')
+    parser.add_argument('--save_lgbm_ckpt', type=int, default=1, choices=[0, 1], help='1 saves trained LGBM model artifacts, 0 disables saving')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -91,9 +92,9 @@ def parse_args():
 
 
 def run_lgbm_fold(args, labels_train, labels_val, labels_test,
-                  fp_train, fp_val, fp_test, has_test, fold=None):
+                  train_features, val_features, test_features, has_test, fold=None, model_tag="gbdt"):
     if args.task_type != "classification":
-        print("Skipping LGBM baseline because it currently supports classification only.")
+        print("Skipping LGBM stage because it currently supports classification only.")
         return None
 
     try:
@@ -101,9 +102,9 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     except ImportError as exc:
         raise ImportError("LightGBM is not installed. Install 'lightgbm' to use --lgbm 1.") from exc
 
-    fp_train = np.asarray(fp_train, dtype=np.float32)
-    fp_val = np.asarray(fp_val, dtype=np.float32)
-    fp_test = np.asarray(fp_test, dtype=np.float32) if has_test else None
+    train_features = np.asarray(train_features, dtype=np.float32)
+    val_features = np.asarray(val_features, dtype=np.float32)
+    test_features = np.asarray(test_features, dtype=np.float32) if has_test else None
 
     num_tasks = labels_train.shape[1]
     y_pro_train = np.full((labels_train.shape[0], num_tasks), 0.5, dtype=np.float32)
@@ -115,6 +116,8 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         y_pro_test = np.full((labels_test.shape[0], num_tasks), 0.5, dtype=np.float32)
         y_pred_test = np.zeros((labels_test.shape[0], num_tasks), dtype=np.int32)
 
+    task_models = [None] * num_tasks
+
     for task_idx in range(num_tasks):
         y_task = labels_train[:, task_idx]
         valid = y_task != -1
@@ -122,8 +125,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         if len(valid_classes) < 2:
             continue
         
-        # best seen parameters for now, can be exposed as args if desired
-        lgbm = LGBMClassifier(
+        clf = LGBMClassifier(
             n_estimators=3000,
             learning_rate=0.02,
             num_leaves=31,
@@ -134,17 +136,19 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
             reg_alpha=0.5,
             reg_lambda=5.0
         )
-        lgbm.fit(fp_train[valid], y_task[valid])
 
-        train_proba = lgbm.predict_proba(fp_train)[:, 1]
-        val_proba = lgbm.predict_proba(fp_val)[:, 1]
+        clf.fit(train_features[valid], y_task[valid])
+        task_models[task_idx] = clf
+
+        train_proba = clf.predict_proba(train_features)[:, 1]
+        val_proba = clf.predict_proba(val_features)[:, 1]
         y_pro_train[:, task_idx] = train_proba
         y_pro_val[:, task_idx] = val_proba
         y_pred_train[:, task_idx] = (train_proba > 0.5).astype(np.int32)
         y_pred_val[:, task_idx] = (val_proba > 0.5).astype(np.int32)
 
         if has_test:
-            test_proba = lgbm.predict_proba(fp_test)[:, 1]
+            test_proba = clf.predict_proba(test_features)[:, 1]
             y_pro_test[:, task_idx] = test_proba
             y_pred_test[:, task_idx] = (test_proba > 0.5).astype(np.int32)
 
@@ -161,7 +165,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
 
     lgbm_log = {
         "fold": fold + 1 if fold is not None else None,
-        "model": "lgbm",
+        "model": f"lgbm_{model_tag}",
         "Train AUPR": train_results.get("AUPR"),
         "Validation AUPR": val_results.get("AUPR"),
         "topk_hitrate": {
@@ -174,10 +178,32 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         lgbm_log["topk_hitrate"][f"Test Top{topk_k} Hit Rate"] = test_topk_hitrate
 
     print(lgbm_log)
-    lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_fold{fold+1}.txt" if fold is not None else "training_log_lgbm.txt")
+    lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_{model_tag}_fold{fold+1}.txt" if fold is not None else f"training_log_lgbm_{model_tag}.txt")
     output_epoch_results(lgbm_log_file, lgbm_log, train_results)
 
-    lgbm_plot_path = os.path.join(args.log_dir, f"lgbm_plot_fold{fold+1}.png" if fold is not None else "lgbm_plot.png")
+    if args.save_lgbm_ckpt == 1:
+        ckpt_dir = os.path.join(args.log_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        lgbm_ckpt_path = os.path.join(
+            ckpt_dir,
+            f"lgbm_{model_tag}_fold{fold+1}.pkl" if fold is not None else f"lgbm_{model_tag}.pkl"
+        )
+        artifact = {
+            "fold": fold + 1 if fold is not None else None,
+            "model": f"lgbm_{model_tag}",
+            "num_tasks": num_tasks,
+            "task_models": task_models,
+            "valid_task_mask": [m is not None for m in task_models],
+            "decision_threshold": 0.5,
+            "feature_layout": {
+                "concat_order": ["image_embedding", "ecfp4"],
+            },
+        }
+        with open(lgbm_ckpt_path, "wb") as f:
+            pickle.dump(artifact, f)
+        print(f"Saved LGBM artifact to: {lgbm_ckpt_path}")
+
+    lgbm_plot_path = os.path.join(args.log_dir, f"lgbm_{model_tag}_plot_fold{fold+1}.png" if fold is not None else f"lgbm_{model_tag}_plot.png")
     if has_test:
         gen_AUPR_plot(lgbm_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [test_results.get("AUPR")], fold)
         gen_topk_hitrate_plot(lgbm_plot_path, 0, [train_topk_hitrate], [val_topk_hitrate], [test_topk_hitrate], topk_k, fold)
@@ -187,6 +213,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
 
     lgbm_results = {
         "highest_valid": val_results.get("AUPR"),
+        "val_top200_hitrate": val_topk_hitrate,
         "final_train": train_results.get("AUPR"),
         "final_test": test_results.get("AUPR") if has_test else None,
         "highest_valid_desc": val_results,
@@ -203,13 +230,44 @@ def _extract_fp_features(ecfp4_pairs, indices):
         raise ValueError("Expected ecfp4 pairs shaped (n, 2) as [[fingerprint, label], ...].")
     return np.vstack(selected[:, 0]).astype(np.float32)
 
+
+@torch.no_grad()
+def _extract_image_embeddings(model, dataset, batch_size, workers, device):
+    """Extract 512-d (or backbone out-dim) embeddings from the ResNet backbone."""
+    model.eval()
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+    backbone = model.module if isinstance(model, torch.nn.DataParallel) else model
+    embeddings = []
+
+    for images, _ in loader:
+        images = images.to(device)
+        x = backbone.conv1(images)
+        x = backbone.bn1(x)
+        x = backbone.relu(x)
+        x = backbone.maxpool(x)
+        x = backbone.layer1(x)
+        x = backbone.layer2(x)
+        x = backbone.layer3(x)
+        x = backbone.layer4(x)
+        x = backbone.avgpool(x)
+        x = torch.flatten(x, 1)
+        embeddings.append(x.detach().cpu().numpy())
+
+    return np.vstack(embeddings).astype(np.float32)
+
+
+def _concat_image_fp_features(img_features, fp_features):
+    if len(img_features) != len(fp_features):
+        raise ValueError(
+            f"Image embedding rows ({len(img_features)}) and fingerprint rows ({len(fp_features)}) do not match."
+        )
+    return np.concatenate([img_features, fp_features], axis=1).astype(np.float32)
+
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
                       img_transformer_train, img_transformer_test, fold=None,
                       fp_train=None, fp_val=None, fp_test=None):
-    
-    # var if we are doing k fold with predefined splits, to distinguish from single split scenario in the logs and outputs
-    has_test = args.split not in {'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold', 'random-k-fold', 'random200-k-fold'}
+    has_test = len(name_test) > 0
     
     # make the datasets and dataloaders according to the fold indices
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -233,20 +291,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     lgbm_results = None
-    if args.lgbm:
-        if fp_train is None or fp_val is None or (has_test and fp_test is None):
-            raise ValueError("LGBM is enabled but fingerprint arrays are missing for this fold.")
-        lgbm_results = run_lgbm_fold(
-            args=args,
-            labels_train=labels_train,
-            labels_val=labels_val,
-            labels_test=labels_test,
-            fp_train=fp_train,
-            fp_val=fp_val,
-            fp_test=fp_test,
-            has_test=has_test,
-            fold=fold,
-        )
 
     # train the model
     model = load_model(args.image_model, imageSize=args.imageSize, num_classes=num_tasks, dropout_rate=args.dropout_rate)
@@ -377,7 +421,15 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         raise Exception(f"param {args.task_type} is not supported.")
 
-    results = {'highest_valid': min_value, 'final_train': min_value, 'final_test': min_value, 'highest_train': min_value, 'highest_valid_desc': None, "final_train_desc": None, "final_test_desc": None}
+    results = {
+        'highest_valid': min_value,
+        'final_train': min_value,
+        'final_test': (min_value if has_test else np.nan),
+        'highest_train': min_value,
+        'highest_valid_desc': None,
+        "final_train_desc": None,
+        "final_test_desc": None,
+    }
     early_stop = 0
     patience = 30
 
@@ -536,6 +588,38 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}".format(results["highest_valid"], results["final_train"]))
 
+    if args.lgbm:
+        if fp_train is None or fp_val is None or (has_test and fp_test is None):
+            raise ValueError("Concatenation mode requires fingerprint features for train/val splits (and test if present).")
+
+        img_train = _extract_image_embeddings(model, train_dataset, args.batch, args.workers, device)
+        img_val = _extract_image_embeddings(model, val_dataset, args.batch, args.workers, device)
+        
+        if has_test:
+            img_test = _extract_image_embeddings(model, test_dataset, args.batch, args.workers, device) if has_test else None
+        else:
+            img_test = []
+        concat_train = _concat_image_fp_features(img_train, fp_train)
+        concat_val = _concat_image_fp_features(img_val, fp_val)
+
+        if has_test:
+            concat_test = _concat_image_fp_features(img_test, fp_test) if has_test else None
+        else:
+            concat_test = []
+            
+        lgbm_results = run_lgbm_fold(
+            args=args,
+            labels_train=labels_train,
+            labels_val=labels_val,
+            labels_test=labels_test,
+            train_features=concat_train,
+            val_features=concat_val,
+            test_features=concat_test,
+            has_test=has_test,
+            fold=fold,
+            model_tag="concat",
+        )
+
     if lgbm_results is not None:
         results["lgbm_results"] = lgbm_results
     return results
@@ -650,7 +734,8 @@ def main(args):
             # convert indices to numpy arrays for easier indexing
             train_idx = np.array(train_idx, dtype=int)
             val_idx = np.array(val_idx, dtype=int)
-            test_idx = np.array(test_idx, dtype=int)
+            # In CV mode we use only train/val and skip test evaluation.
+            test_idx = np.array([], dtype=int)
 
             name_train, name_val, name_test = names[train_idx], names[val_idx], names[test_idx]
             labels_train, labels_val, labels_test = labels[train_idx], labels[val_idx], labels[test_idx]
@@ -665,10 +750,25 @@ def main(args):
         # Aggregate results across folds
         avg_valid = np.mean([r['highest_valid'] for r in fold_results])
         avg_train = np.mean([r['final_train'] for r in fold_results])
-        avg_test = np.mean([r['final_test'] for r in fold_results])
+        valid_test_vals = [r['final_test'] for r in fold_results if r['final_test'] is not None and not np.isnan(r['final_test'])]
+        avg_test = np.mean(valid_test_vals) if len(valid_test_vals) > 0 else np.nan
 
         final_output_path = os.path.join(args.log_dir, "final_results.txt")
         output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test, fold_results)
+        # Additionally, if LGBM was run, generate a bar plot comparing fold validation AUPR and top-k hit rate
+        if args.lgbm:
+            fold_val_aupr = []
+            fold_val_topk = []
+            for r in fold_results:
+                lgbm_r = r.get("lgbm_results") if isinstance(r, dict) else None
+                if lgbm_r is None:
+                    continue
+                fold_val_aupr.append(float(lgbm_r.get("highest_valid", np.nan)))
+                fold_val_topk.append(float(lgbm_r.get("val_top200_hitrate", np.nan)))
+
+            if len(fold_val_aupr) > 0 and len(fold_val_topk) == len(fold_val_aupr):
+                fold_bar_path = os.path.join(args.log_dir, "lgbm_concat_validation_bars.png")
+                gen_fold_validation_bars(fold_bar_path, fold_val_aupr, fold_val_topk, topk_k=200)
 
 if __name__ == "__main__":
     args = parse_args()
