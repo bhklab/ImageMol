@@ -103,6 +103,50 @@ def gen_fold_validation_bars(plot_path, val_aupr_list, val_topk_hitrate_list, to
     plt.savefig(plot_path)
     plt.close(fig)
 
+# CHECK
+def gen_fold_model_comparison_bars(
+    plot_path,
+    lgbm_val_aupr_list,
+    lgbm_val_topk_hitrate_list,
+    gmu_val_aupr_list,
+    gmu_val_topk_hitrate_list,
+    topk_k=200,
+):
+    """Generate fold-wise grouped bars comparing LGBM and GMU validation metrics."""
+    n_folds = min(
+        len(lgbm_val_aupr_list),
+        len(lgbm_val_topk_hitrate_list),
+        len(gmu_val_aupr_list),
+        len(gmu_val_topk_hitrate_list),
+    )
+    if n_folds == 0:
+        return
+
+    folds = np.arange(1, n_folds + 1)
+    width = 0.36
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+    axes[0].bar(folds - width / 2, lgbm_val_aupr_list[:n_folds], width=width, label='LGBM', color='#1f77b4')
+    axes[0].bar(folds + width / 2, gmu_val_aupr_list[:n_folds], width=width, label='GMU', color='#2ca02c')
+    axes[0].set_title('Validation AUPR by Fold (LGBM vs GMU)')
+    axes[0].set_xlabel('Fold')
+    axes[0].set_ylabel('AUPR')
+    axes[0].set_xticks(folds)
+    axes[0].legend(loc='best')
+
+    axes[1].bar(folds - width / 2, lgbm_val_topk_hitrate_list[:n_folds], width=width, label='LGBM', color='#ff7f0e')
+    axes[1].bar(folds + width / 2, gmu_val_topk_hitrate_list[:n_folds], width=width, label='GMU', color='#9467bd')
+    axes[1].set_title(f'Validation Top{topk_k} Hit Rate by Fold (LGBM vs GMU)')
+    axes[1].set_xlabel('Fold')
+    axes[1].set_ylabel(f'Top{topk_k} Hit Rate')
+    axes[1].set_xticks(folds)
+    axes[1].legend(loc='best')
+
+    fig.tight_layout()
+    plt.savefig(plot_path)
+    plt.close(fig)
+
 # Function to write epoch log and train results to the log file
 def output_epoch_results(log_file_path, epoch_log, train_results):
     """

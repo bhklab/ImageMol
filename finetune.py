@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import pickle
 from collections import Counter
@@ -23,7 +24,7 @@ from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate, met
 import yaml
 
 from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
-    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot, gen_fold_validation_bars
+    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot, gen_fold_validation_bars, gen_fold_model_comparison_bars
 
 
 
@@ -81,6 +82,11 @@ def parse_args():
     parser.add_argument('--lgbm', type=int, default=0, choices=[0, 1], help='whether to run LGBM baseline using ECFP4 fingerprints')
     parser.add_argument('--data_type', type=str, default='processed', help='data type path level used for fingerprint parquet in bucket path')
     parser.add_argument('--save_lgbm_ckpt', type=int, default=1, choices=[0, 1], help='1 saves trained LGBM model artifacts, 0 disables saving')
+    parser.add_argument('--gmu', type=int, default=1, choices=[0, 1], help='whether to train GMU fusion over ImageMol embeddings and LGBM scores')
+    parser.add_argument('--gmu_hidden_dim', type=int, default=256, help='hidden dimension for GMU fusion model')
+    parser.add_argument('--gmu_epochs', type=int, default=50, help='number of epochs for GMU fusion training')
+    parser.add_argument('--gmu_lr', type=float, default=1e-3, help='learning rate for GMU fusion training')
+    parser.add_argument('--save_gmu_ckpt', type=int, default=1, choices=[0, 1], help='1 saves trained GMU fusion checkpoints, 0 disables saving')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -220,6 +226,10 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         "highest_valid_desc": val_results,
         "final_train_desc": train_results,
         "final_test_desc": test_results if has_test else None,
+        "task_models": task_models,
+        "train_scores": y_pro_train,
+        "val_scores": y_pro_val,
+        "test_scores": y_pro_test if has_test else None,
     }
     return lgbm_results
 
@@ -230,6 +240,227 @@ def _extract_fp_features(ecfp4_pairs, indices):
     if selected.ndim != 2 or selected.shape[1] < 1:
         raise ValueError("Expected ecfp4 pairs shaped (n, 2) as [[fingerprint, label], ...].")
     return np.vstack(selected[:, 0]).astype(np.float32)
+
+# CHECK
+@torch.no_grad()
+def _extract_image_embeddings(model, dataset, batch_size, workers, device):
+    """Extract ResNet backbone embeddings for each sample in dataset order."""
+    model.eval()
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+    backbone = model.module if isinstance(model, torch.nn.DataParallel) else model
+    embeddings = []
+
+    for images, _ in loader:
+        images = images.to(device)
+        x = backbone.conv1(images)
+        x = backbone.bn1(x)
+        x = backbone.relu(x)
+        x = backbone.maxpool(x)
+        x = backbone.layer1(x)
+        x = backbone.layer2(x)
+        x = backbone.layer3(x)
+        x = backbone.layer4(x)
+        x = backbone.avgpool(x)
+        x = torch.flatten(x, 1)
+        embeddings.append(x.detach().cpu().numpy())
+
+    return np.vstack(embeddings).astype(np.float32)
+
+#CHECK
+def _predict_lgbm_multitask_scores(task_models, features):
+    """Predict per-task probabilities from fitted per-task LGBM models."""
+    x = np.asarray(features, dtype=np.float32)
+    num_tasks = len(task_models)
+    y_pro = np.full((x.shape[0], num_tasks), 0.5, dtype=np.float32)
+    for task_idx, clf in enumerate(task_models):
+        if clf is None:
+            continue
+        y_pro[:, task_idx] = clf.predict_proba(x)[:, 1]
+    return y_pro
+
+# CHECK
+class GMUFusionModel(nn.Module):
+    """GMU fusion block adapted for image embeddings + fingerprint-model scores."""
+
+    def __init__(self, image_dim, fp_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.img_proj = nn.Linear(image_dim, hidden_dim)
+        self.fp_proj = nn.Linear(fp_dim, hidden_dim)
+        self.gate = nn.Linear(image_dim + fp_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, image_x, fp_x):
+        h_img = torch.tanh(self.img_proj(image_x))
+        h_fp = torch.tanh(self.fp_proj(fp_x))
+        z = torch.sigmoid(self.gate(torch.cat([image_x, fp_x], dim=1)))
+        h = z * h_img + (1.0 - z) * h_fp
+        return self.out(h)
+
+# CHECK
+def _run_gmu_fusion_fold(args, device, fold,
+                         labels_train, labels_val, labels_test,
+                         img_train, img_val, img_test,
+                         fp_train_scores, fp_val_scores, fp_test_scores,
+                         has_test):
+    """Train and evaluate a GMU fusion model on one fold."""
+    if args.task_type != "classification":
+        print("Skipping GMU stage because it currently supports classification only.")
+        return None
+
+    x_img_train = torch.from_numpy(np.asarray(img_train, dtype=np.float32)).to(device)
+    x_img_val = torch.from_numpy(np.asarray(img_val, dtype=np.float32)).to(device)
+    x_fp_train = torch.from_numpy(np.asarray(fp_train_scores, dtype=np.float32)).to(device)
+    x_fp_val = torch.from_numpy(np.asarray(fp_val_scores, dtype=np.float32)).to(device)
+
+    y_train = torch.from_numpy(np.asarray(labels_train, dtype=np.float32)).to(device)
+    y_val = torch.from_numpy(np.asarray(labels_val, dtype=np.float32)).to(device)
+
+    if has_test:
+        x_img_test = torch.from_numpy(np.asarray(img_test, dtype=np.float32)).to(device)
+        x_fp_test = torch.from_numpy(np.asarray(fp_test_scores, dtype=np.float32)).to(device)
+        y_test = torch.from_numpy(np.asarray(labels_test, dtype=np.float32)).to(device)
+
+    model = GMUFusionModel(
+        image_dim=x_img_train.shape[1],
+        fp_dim=x_fp_train.shape[1],
+        hidden_dim=args.gmu_hidden_dim,
+        out_dim=y_train.shape[1],
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.gmu_lr, weight_decay=1e-5)
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
+    best_val = -np.inf
+    best_state = None
+    patience = 10
+    early_stop = 0
+    topk_k = 200
+
+    for epoch in range(args.gmu_epochs):
+        model.train()
+        optimizer.zero_grad()
+        logits = model(x_img_train, x_fp_train)
+        mask = y_train != -1
+        y_train_safe = torch.where(mask, y_train, torch.zeros_like(y_train))
+        loss_mat = criterion(logits, y_train_safe)
+        denom = torch.clamp(mask.sum().float(), min=1.0)
+        loss = (loss_mat * mask.float()).sum() / denom
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            train_logits = model(x_img_train, x_fp_train)
+            val_logits = model(x_img_val, x_fp_val)
+
+        train_pro = torch.sigmoid(train_logits).cpu().numpy()
+        val_pro = torch.sigmoid(val_logits).cpu().numpy()
+        train_pred = (train_pro > 0.5).astype(np.int32)
+        val_pred = (val_pro > 0.5).astype(np.int32)
+
+        train_np = y_train.cpu().numpy()
+        val_np = y_val.cpu().numpy()
+        train_results = metric_multitask(train_np, train_pred, train_pro, num_tasks=train_np.shape[1], empty=-1)
+        val_results = metric_multitask(val_np, val_pred, val_pro, num_tasks=val_np.shape[1], empty=-1)
+
+        val_aupr = float(val_results.get("AUPR", -np.inf))
+        if np.isfinite(val_aupr) and val_aupr > best_val:
+            best_val = val_aupr
+            best_state = copy.deepcopy(model.state_dict())
+            early_stop = 0
+        else:
+            early_stop += 1
+            if early_stop > patience:
+                break
+
+        gmu_epoch_log = {
+            "fold": fold + 1 if fold is not None else None,
+            "epoch": epoch,
+            "Loss": float(loss.item()),
+            "Train AUPR": train_results.get("AUPR"),
+            "Validation AUPR": val_results.get("AUPR"),
+            "topk_hitrate": {
+                f"Train Top{topk_k} Hit Rate": compute_topk_hit_rate(train_pro.flatten(), train_np.flatten(), k=topk_k),
+                f"Val Top{topk_k} Hit Rate": compute_topk_hit_rate(val_pro.flatten(), val_np.flatten(), k=topk_k),
+            },
+        }
+        gmu_log_file = os.path.join(args.log_dir, f"training_log_gmu_fold{fold+1}.txt" if fold is not None else "training_log_gmu.txt")
+        output_epoch_results(gmu_log_file, gmu_epoch_log, train_results)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    model.eval()
+    with torch.no_grad():
+        train_logits = model(x_img_train, x_fp_train)
+        val_logits = model(x_img_val, x_fp_val)
+        if has_test:
+            test_logits = model(x_img_test, x_fp_test)
+
+    train_pro = torch.sigmoid(train_logits).cpu().numpy()
+    val_pro = torch.sigmoid(val_logits).cpu().numpy()
+    train_pred = (train_pro > 0.5).astype(np.int32)
+    val_pred = (val_pro > 0.5).astype(np.int32)
+
+    train_np = y_train.cpu().numpy()
+    val_np = y_val.cpu().numpy()
+    train_results = metric_multitask(train_np, train_pred, train_pro, num_tasks=train_np.shape[1], empty=-1)
+    val_results = metric_multitask(val_np, val_pred, val_pro, num_tasks=val_np.shape[1], empty=-1)
+    train_topk_hitrate = compute_topk_hit_rate(train_pro.flatten(), train_np.flatten(), k=topk_k)
+    val_topk_hitrate = compute_topk_hit_rate(val_pro.flatten(), val_np.flatten(), k=topk_k)
+
+    gmu_results = {
+        "highest_valid": val_results.get("AUPR"),
+        "val_top200_hitrate": val_topk_hitrate,
+        "final_train": train_results.get("AUPR"),
+        "final_test": None,
+        "highest_valid_desc": val_results,
+        "final_train_desc": train_results,
+        "final_test_desc": None,
+    }
+
+    if has_test:
+        test_pro = torch.sigmoid(test_logits).cpu().numpy()
+        test_pred = (test_pro > 0.5).astype(np.int32)
+        test_np = y_test.cpu().numpy()
+        test_results = metric_multitask(test_np, test_pred, test_pro, num_tasks=test_np.shape[1], empty=-1)
+        test_topk_hitrate = compute_topk_hit_rate(test_pro.flatten(), test_np.flatten(), k=topk_k)
+        gmu_results["final_test"] = test_results.get("AUPR")
+        gmu_results["final_test_desc"] = test_results
+    else:
+        test_results = None
+        test_topk_hitrate = None
+
+    if args.save_gmu_ckpt == 1:
+        ckpt_dir = os.path.join(args.log_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        gmu_ckpt_path = os.path.join(ckpt_dir, f"gmu_fold{fold+1}.pth" if fold is not None else "gmu.pth")
+        state = {
+            "fold": fold + 1 if fold is not None else None,
+            "model_state_dict": model.state_dict(),
+            "model_config": {
+                "image_dim": x_img_train.shape[1],
+                "fp_dim": x_fp_train.shape[1],
+                "hidden_dim": args.gmu_hidden_dim,
+                "out_dim": y_train.shape[1],
+            },
+            "decision_threshold": 0.5,
+            "feature_layout": {
+                "modalities": ["image_embedding", "lgbm_task_scores"],
+            },
+            "metrics": gmu_results,
+        }
+        torch.save(state, gmu_ckpt_path)
+        print(f"Saved GMU artifact to: {gmu_ckpt_path}")
+
+    gmu_plot_path = os.path.join(args.log_dir, f"gmu_plot_fold{fold+1}.png" if fold is not None else "gmu_plot.png")
+    if has_test:
+        gen_AUPR_plot(gmu_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [test_results.get("AUPR")], fold)
+        gen_topk_hitrate_plot(gmu_plot_path, 0, [train_topk_hitrate], [val_topk_hitrate], [test_topk_hitrate], topk_k, fold)
+    else:
+        gen_AUPR_plot(gmu_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [], fold)
+        gen_topk_hitrate_plot(gmu_plot_path, 0, [train_topk_hitrate], [val_topk_hitrate], [], topk_k, fold)
+
+    return gmu_results
 
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
@@ -564,8 +795,40 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}".format(results["highest_valid"], results["final_train"]))
 
+    gmu_results = None
+    if args.gmu and args.lgbm and lgbm_results is not None:
+        task_models = lgbm_results.get("task_models")
+        if task_models is None:
+            raise ValueError("GMU requires fitted LGBM task models, but none were found.")
+
+        img_train = _extract_image_embeddings(model, train_dataset, args.batch, args.workers, device)
+        img_val = _extract_image_embeddings(model, val_dataset, args.batch, args.workers, device)
+        img_test = _extract_image_embeddings(model, test_dataset, args.batch, args.workers, device) if has_test else None
+
+        fp_train_scores = _predict_lgbm_multitask_scores(task_models, fp_train)
+        fp_val_scores = _predict_lgbm_multitask_scores(task_models, fp_val)
+        fp_test_scores = _predict_lgbm_multitask_scores(task_models, fp_test) if has_test else None
+
+        gmu_results = _run_gmu_fusion_fold(
+            args=args,
+            device=device,
+            fold=fold,
+            labels_train=labels_train,
+            labels_val=labels_val,
+            labels_test=labels_test,
+            img_train=img_train,
+            img_val=img_val,
+            img_test=img_test,
+            fp_train_scores=fp_train_scores,
+            fp_val_scores=fp_val_scores,
+            fp_test_scores=fp_test_scores,
+            has_test=has_test,
+        )
+
     if lgbm_results is not None:
         results["lgbm_results"] = lgbm_results
+    if gmu_results is not None:
+        results["gmu_results"] = gmu_results
     return results
 
 ### MAIN FUNCTION ###
@@ -710,6 +973,36 @@ def main(args):
             if len(fold_val_aupr) > 0 and len(fold_val_topk) == len(fold_val_aupr):
                 fold_bar_path = os.path.join(args.log_dir, "lgbm_validation_bars.png")
                 gen_fold_validation_bars(fold_bar_path, fold_val_aupr, fold_val_topk, topk_k=200)
+
+        if args.lgbm and args.gmu:
+            lgbm_fold_val_aupr = []
+            lgbm_fold_val_topk = []
+            gmu_fold_val_aupr = []
+            gmu_fold_val_topk = []
+
+            for r in fold_results:
+                if not isinstance(r, dict):
+                    continue
+                lgbm_r = r.get("lgbm_results")
+                gmu_r = r.get("gmu_results")
+                if lgbm_r is None or gmu_r is None:
+                    continue
+
+                lgbm_fold_val_aupr.append(float(lgbm_r.get("highest_valid", np.nan)))
+                lgbm_fold_val_topk.append(float(lgbm_r.get("val_top200_hitrate", np.nan)))
+                gmu_fold_val_aupr.append(float(gmu_r.get("highest_valid", np.nan)))
+                gmu_fold_val_topk.append(float(gmu_r.get("val_top200_hitrate", np.nan)))
+
+            if len(lgbm_fold_val_aupr) > 0 and len(lgbm_fold_val_aupr) == len(gmu_fold_val_aupr):
+                compare_plot_path = os.path.join(args.log_dir, "lgbm_vs_gmu_validation_bars.png")
+                gen_fold_model_comparison_bars(
+                    compare_plot_path,
+                    lgbm_fold_val_aupr,
+                    lgbm_fold_val_topk,
+                    gmu_fold_val_aupr,
+                    gmu_fold_val_topk,
+                    topk_k=200,
+                )
 
 if __name__ == "__main__":
     args = parse_args()
