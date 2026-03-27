@@ -1,5 +1,6 @@
 import argparse
 import os
+import pickle
 from collections import Counter
 import numpy as np
 import torch
@@ -22,7 +23,7 @@ from model.evaluate import compute_topk_precision_f1, compute_topk_hit_rate, met
 import yaml
 
 from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_topkprecf1_plots, gen_topk_hitrate_plot, output_final_kfold_results, \
-    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot
+    output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot, gen_fold_validation_bars
 
 
 
@@ -79,6 +80,7 @@ def parse_args():
     # lgbm baseline
     parser.add_argument('--lgbm', type=int, default=0, choices=[0, 1], help='whether to run LGBM baseline using ECFP4 fingerprints')
     parser.add_argument('--data_type', type=str, default='processed', help='data type path level used for fingerprint parquet in bucket path')
+    parser.add_argument('--save_lgbm_ckpt', type=int, default=1, choices=[0, 1], help='1 saves trained LGBM model artifacts, 0 disables saving')
 
     # log
     parser.add_argument('--log_dir', default='./logs/finetune/', help='path to log')
@@ -115,6 +117,8 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         y_pro_test = np.full((labels_test.shape[0], num_tasks), 0.5, dtype=np.float32)
         y_pred_test = np.zeros((labels_test.shape[0], num_tasks), dtype=np.int32)
 
+    task_models = [None] * num_tasks
+
     for task_idx in range(num_tasks):
         y_task = labels_train[:, task_idx]
         valid = y_task != -1
@@ -135,6 +139,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
             reg_lambda=5.0
         )
         lgbm.fit(fp_train[valid], y_task[valid])
+        task_models[task_idx] = lgbm
 
         train_proba = lgbm.predict_proba(fp_train)[:, 1]
         val_proba = lgbm.predict_proba(fp_val)[:, 1]
@@ -177,6 +182,28 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_fold{fold+1}.txt" if fold is not None else "training_log_lgbm.txt")
     output_epoch_results(lgbm_log_file, lgbm_log, train_results)
 
+    if args.save_lgbm_ckpt == 1:
+        ckpt_dir = os.path.join(args.log_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        lgbm_ckpt_path = os.path.join(
+            ckpt_dir,
+            f"lgbm_fold{fold+1}.pkl" if fold is not None else "lgbm.pkl"
+        )
+        artifact = {
+            "fold": fold + 1 if fold is not None else None,
+            "model": "lgbm",
+            "num_tasks": num_tasks,
+            "task_models": task_models,
+            "valid_task_mask": [m is not None for m in task_models],
+            "decision_threshold": 0.5,
+            "feature_layout": {
+                "concat_order": ["ecfp4"],
+            },
+        }
+        with open(lgbm_ckpt_path, "wb") as f:
+            pickle.dump(artifact, f)
+        print(f"Saved LGBM artifact to: {lgbm_ckpt_path}")
+
     lgbm_plot_path = os.path.join(args.log_dir, f"lgbm_plot_fold{fold+1}.png" if fold is not None else "lgbm_plot.png")
     if has_test:
         gen_AUPR_plot(lgbm_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [test_results.get("AUPR")], fold)
@@ -187,6 +214,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
 
     lgbm_results = {
         "highest_valid": val_results.get("AUPR"),
+        "val_top200_hitrate": val_topk_hitrate,
         "final_train": train_results.get("AUPR"),
         "final_test": test_results.get("AUPR") if has_test else None,
         "highest_valid_desc": val_results,
@@ -669,6 +697,19 @@ def main(args):
 
         final_output_path = os.path.join(args.log_dir, "final_results.txt")
         output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test, fold_results)
+        if args.lgbm:
+            fold_val_aupr = []
+            fold_val_topk = []
+            for r in fold_results:
+                lgbm_r = r.get("lgbm_results") if isinstance(r, dict) else None
+                if lgbm_r is None:
+                    continue
+                fold_val_aupr.append(float(lgbm_r.get("highest_valid", np.nan)))
+                fold_val_topk.append(float(lgbm_r.get("val_top200_hitrate", np.nan)))
+
+            if len(fold_val_aupr) > 0 and len(fold_val_topk) == len(fold_val_aupr):
+                fold_bar_path = os.path.join(args.log_dir, "lgbm_validation_bars.png")
+                gen_fold_validation_bars(fold_bar_path, fold_val_aupr, fold_val_topk, topk_k=200)
 
 if __name__ == "__main__":
     args = parse_args()
