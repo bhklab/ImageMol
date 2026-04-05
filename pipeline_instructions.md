@@ -108,7 +108,7 @@ Alexander Leonardos
         Accelerator Type: NVIDIA_L4
         Accelerator Count: 1
 
-    f. Can do inference training on GCP with anotehr container from Artifact Registry, but it's likely easier to do locally.
+    f. Can do inference training on GCP with another container from Artifact Registry, but it's likely easier to do locally.
 
 ## Run Inference:
 

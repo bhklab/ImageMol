@@ -56,4 +56,4 @@ COPY . /workspace
 ENTRYPOINT ["python", "finetune.py"]
 
 # Start the container with a config file if desired
-# ENTRYPOINT ["python", "finetune.py", "--config", "config.yaml"]
+# ENTRYPOINT ["python", "finetune.py", "--config", "hyperparam_config.yaml"]
