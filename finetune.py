@@ -84,11 +84,15 @@ def parse_args():
     args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
     return args
 
+# Runs a full training and evaluation loop for one fold of data (or the single split scenario if not doing k-fold). 
+# Returns a dictionary of results for the fold.
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
                       img_transformer_train, img_transformer_test, fold=None):
     
     # var if we are doing k fold with predefined splits, to distinguish from single split scenario in the logs and outputs
+    # I have hardcoded these values as spliting methods that appear in the google drive folder with predefined splits, 
+    # but this can be easily changed if needed
     has_test = args.split not in {'scaffold-k-fold', 'butina-k-fold', 'agglo-k-fold', 'random-k-fold', 'random200-k-fold'}
     
     # make the datasets and dataloaders according to the fold indices
@@ -99,6 +103,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     if has_test:
         test_dataset = ImageDataset(name_test, labels_test, img_transformer=transforms.Compose(img_transformer_test), normalize=normalize, args=args)
 
+    # Sample Batches
     if args.task_type == "classification":
         unique_labels = np.unique(labels_train[labels_train != -1])
         if len(unique_labels) == 2:
@@ -189,6 +194,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     if not param_groups:
         raise ValueError("No trainable parameters found. Check freeze settings.")
 
+    # Initialize the optimizer based on the specified type
+
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(
             param_groups,
@@ -208,7 +215,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
 
-    # initialize the scheduler
+    # initialize the learning rate scheduler
 
     if args.lr_scheduler == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -248,8 +255,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
-    # train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
-    # train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
     train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
     topk_k = 200
 
@@ -309,22 +314,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                                                                  k=topk_k) if 'y_pro' in test_data_dict \
                                                                  and 'y_true' in test_data_dict else None)
 
-        # Compute top-15 precision and F1 for train/val/test
-        # for split_data_dict, split_labels, prec_list, f1_list in [
-        #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
-        #     (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
-        #     (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
-        # ]:
-        #     # Get predicted probabilities and true labels (flatten if multitask)
-        #     probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
-        #     labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
-        #     if len(probs) > 0 and len(labels) > 0:
-        #         prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
-        #     else:
-        #         prec, f1 = None, None
-        #     prec_list.append(prec)
-        #     f1_list.append(f1)
 
+        # compute top k hitrate
         if eval_metric == "topk_hitrate":
             train_result = train_topk_hitrate_list[-1]
             valid_result = val_topk_hitrate_list[-1]
@@ -339,8 +330,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         if has_test:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1], f'Test Top{topk_k} Hit Rate': test_topk_hitrate_list[-1]}}
-                    #  f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
-                    #  f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         else:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1]}}
@@ -349,6 +338,11 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
         output_epoch_results(log_file_path, epoch_log, train_results)
+
+        # Save the best model based on validation performance, 
+        # and also save the corresponding training and test performance at that epoch. 
+        # Use the eval_metric and valid_select to determine whether to maximize or minimize 
+        # the metric for saving the best model.
 
         if is_left_better_right(train_result, results['highest_train'], standard=valid_select):
             results['highest_train'] = train_result
@@ -369,7 +363,9 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         for k, v in results.items():
             if isinstance(v, np.generic):
                 results[k] = float(v)
-        # Save checkpoint only in the final 2 epochs
+
+        # Save checkpoint only in the final 2 epochs 
+        # Reduces the number of checkpoints and focuses on the final performance. - Can be changed if desired.
         if args.save_finetune_ckpt == 1 and epoch >= args.epochs - 2:
             checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
             save_finetune_ckpt(
@@ -386,9 +382,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                     fold)
     else:
         gen_AUPR_plot(plot_path, args.start_epoch, train_aupr_list, val_aupr_list, [], fold)
-    # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
-    # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
-    #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
     
     if has_test:
         gen_topk_hitrate_plot(plot_path, args.start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold)
@@ -482,7 +475,11 @@ def main(args):
                          name_train, labels_train, name_val, labels_val, name_test, labels_test,
                          img_transformer_train, img_transformer_test)
     else:
-        # k-fold branch
+        # k-fold branch, differs for different splitting methods
+
+        # Specifically, since we have predefined splits for scaffold-k-fold, butina-k-fold, agglo-k-fold, 
+        # random-k-fold, and random200-k-fold in the google drive folder, 
+        # we load those splits instead of generating new ones with the same method. 
         if args.split == "stratified-k-fold":
             splits = stratified_k_fold_split_train_val_test(list(range(0, len(names))), labels, n_splits=5, seed=args.seed)
         elif args.split == "scaffold-k-fold":
@@ -495,7 +492,11 @@ def main(args):
             splits = load_existing_k_fold_split('random')
         elif args.split == "random200-k-fold":
             splits = load_existing_k_fold_split('random200')
+
+        
         fold_results = []
+
+        # Loop over all folds, train and evaluate the model, and store the results for each fold.
         for fold, (train_idx, val_idx, test_idx) in enumerate(splits):
             print(f"\n===== Fold {fold+1}/5 =====")
             
@@ -510,16 +511,20 @@ def main(args):
                                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
                                       img_transformer_train, img_transformer_test, fold=fold)
             fold_results.append(result)
+
         # Aggregate results across folds
         avg_valid = np.mean([r['highest_valid'] for r in fold_results])
         avg_train = np.mean([r['final_train'] for r in fold_results])
         avg_test = np.mean([r['final_test'] for r in fold_results])
 
+        # Final output
         final_output_path = os.path.join(args.log_dir, "final_results.txt")
         output_final_kfold_results(final_output_path, avg_valid, avg_train, avg_test, fold_results)
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # Support for loading parameters from a config file, which can be specified with the --config argument.
 
     if args.config:
         with open(args.config, 'r') as f:

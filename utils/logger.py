@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 """ Utility functions for logging and plotting training metrics. """
+# Alexander Leonardos
 
 # Function to generate plots for AUPR, F1, Top-k Precision, and Top-k F1 over epochs
 def gen_AUPR_plot(plot_path, start_epoch,
