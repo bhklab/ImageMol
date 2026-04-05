@@ -90,7 +90,10 @@ def parse_args():
     args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
     return args
 
-
+# Runs a single fold of training for the LGBM baseline, including training, evaluation, logging, and plotting. 
+# Returns a dict of results for this fold.
+# In this architecture, the input to the LGBM is the concatenated image embeddings + ECFP4 fingerprints, 
+# and the LGBM is trained on the train split and evaluated on the val/test splits for this fold.
 def run_lgbm_fold(args, labels_train, labels_val, labels_test,
                   train_features, val_features, test_features, has_test, fold=None, model_tag="gbdt"):
     if args.task_type != "classification":
@@ -125,6 +128,8 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
         if len(valid_classes) < 2:
             continue
         
+        # Load in the LGBM model with the specified high-performinghyperparameters 
+        # (these can be tuned or exposed as args if desired)
         clf = LGBMClassifier(
             n_estimators=3000,
             learning_rate=0.02,
@@ -137,9 +142,11 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
             reg_lambda=5.0
         )
 
+        # Fit the model on the valid portion of the training data for this task
         clf.fit(train_features[valid], y_task[valid])
         task_models[task_idx] = clf
 
+        # Get predicted probabilities and binary predictions for train/val/test for this task
         train_proba = clf.predict_proba(train_features)[:, 1]
         val_proba = clf.predict_proba(val_features)[:, 1]
         y_pro_train[:, task_idx] = train_proba
@@ -152,6 +159,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
             y_pro_test[:, task_idx] = test_proba
             y_pred_test[:, task_idx] = (test_proba > 0.5).astype(np.int32)
 
+    # compute metrics for train/val/test and log them for the LGBM
     train_results = metric_multitask(labels_train, y_pred_train, y_pro_train, num_tasks=num_tasks, empty=-1)
     val_results = metric_multitask(labels_val, y_pred_val, y_pro_val, num_tasks=num_tasks, empty=-1)
     topk_k = 200
@@ -181,6 +189,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_{model_tag}_fold{fold+1}.txt" if fold is not None else f"training_log_lgbm_{model_tag}.txt")
     output_epoch_results(lgbm_log_file, lgbm_log, train_results)
 
+    # generate and save the AUPR and top-k hit rate plots for this LGBM fold
     if args.save_lgbm_ckpt == 1:
         ckpt_dir = os.path.join(args.log_dir, "checkpoints")
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -222,7 +231,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     }
     return lgbm_results
 
-
+# Helper function to extract ECFP4 fingerprint features from the raw fingerprint data for the given indices.
 def _extract_fp_features(ecfp4_pairs, indices):
     """Extract fingerprint vectors from object rows shaped as [fingerprint, label]."""
     selected = ecfp4_pairs[indices]
@@ -230,7 +239,8 @@ def _extract_fp_features(ecfp4_pairs, indices):
         raise ValueError("Expected ecfp4 pairs shaped (n, 2) as [[fingerprint, label], ...].")
     return np.vstack(selected[:, 0]).astype(np.float32)
 
-
+# Helper function to extract image embeddings from the CNN backbone for a given dataset, using the current model weights. 
+# These embeddings are then concatenated with the ECFP4 fingerprint features to create the input features for the LGBM baseline.
 @torch.no_grad()
 def _extract_image_embeddings(model, dataset, batch_size, workers, device):
     """Extract 512-d (or backbone out-dim) embeddings from the ResNet backbone."""
@@ -255,7 +265,7 @@ def _extract_image_embeddings(model, dataset, batch_size, workers, device):
 
     return np.vstack(embeddings).astype(np.float32)
 
-
+# concatenate the image embeddings and fingerprint features to create the final input features for the LGBM baseline.
 def _concat_image_fp_features(img_features, fp_features):
     if len(img_features) != len(fp_features):
         raise ValueError(
@@ -263,6 +273,8 @@ def _concat_image_fp_features(img_features, fp_features):
         )
     return np.concatenate([img_features, fp_features], axis=1).astype(np.float32)
 
+# Main function to run a single fold of training for the LGBM baseline, including training, evaluation, logging, and plotting.
+# Returns a dict of results for this fold.
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
                       img_transformer_train, img_transformer_test, fold=None,
@@ -388,7 +400,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     else:
         raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
 
-    # initialize the scheduler
+    # initialize the learning rate scheduler
 
     if args.lr_scheduler == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -436,8 +448,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
-    # train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
-    # train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
     train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
     topk_k = 200
 
@@ -497,22 +507,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                                                                  k=topk_k) if 'y_pro' in test_data_dict \
                                                                  and 'y_true' in test_data_dict else None)
 
-        # Compute top-15 precision and F1 for train/val/test
-        # for split_data_dict, split_labels, prec_list, f1_list in [
-        #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
-        #     (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
-        #     (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
-        # ]:
-        #     # Get predicted probabilities and true labels (flatten if multitask)
-        #     probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
-        #     labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
-        #     if len(probs) > 0 and len(labels) > 0:
-        #         prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
-        #     else:
-        #         prec, f1 = None, None
-        #     prec_list.append(prec)
-        #     f1_list.append(f1)
-
         if eval_metric == "topk_hitrate":
             train_result = train_topk_hitrate_list[-1]
             valid_result = val_topk_hitrate_list[-1]
@@ -527,8 +521,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         if has_test:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1], f'Test Top{topk_k} Hit Rate': test_topk_hitrate_list[-1]}}
-                    #  f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
-                    #  f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         else:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1]}}
@@ -537,6 +529,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
         output_epoch_results(log_file_path, epoch_log, train_results)
+
+        # Update the best results and check for early stopping based on the validation metric
 
         if is_left_better_right(train_result, results['highest_train'], standard=valid_select):
             results['highest_train'] = train_result
@@ -557,6 +551,8 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         for k, v in results.items():
             if isinstance(v, np.generic):
                 results[k] = float(v)
+
+        
         # Save checkpoint only in the final 2 epochs
         if args.save_finetune_ckpt == 1 and epoch >= args.epochs - 2:
             checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
@@ -574,9 +570,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                     fold)
     else:
         gen_AUPR_plot(plot_path, args.start_epoch, train_aupr_list, val_aupr_list, [], fold)
-    # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
-    # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
-    #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
+
     
     if has_test:
         gen_topk_hitrate_plot(plot_path, args.start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold)
@@ -587,6 +581,9 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}, final_test: {results['final_test']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}, final_test: {:.3f}".format(results["highest_valid"], results["final_train"], results["final_test"]))
     else:
         print(f"Fold {fold+1} results: highest_valid: {results['highest_valid']:.3f}, final_train: {results['final_train']:.3f}" if fold is not None else "final results: highest_valid: {:.3f}, final_train: {:.3f}".format(results["highest_valid"], results["final_train"]))
+
+    # If the LGBM baseline is enabled, extract the image embeddings and concatenate them with the ECFP4 fingerprint 
+    # features to create the input features for the LGBM, then train and evaluate the LGBM model and log its results.
 
     if args.lgbm:
         if fp_train is None or fp_val is None or (has_test and fp_test is None):
