@@ -27,8 +27,6 @@ from utils.logger import output_epoch_results, gen_AUPR_plot, gen_F1_plot, gen_t
     output_final_kfold_results, analyze_split_makeup, gen_topk_hitrate_plot, gen_fold_validation_bars, gen_fold_model_comparison_bars
 
 
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch Implementation of ImageMol')
 
@@ -97,7 +95,9 @@ def parse_args():
     args.log_dir = os.path.join(args.log_dir, f"run_{args.run_num}")
     return args
 
-
+# Run LGBM baseline for one fold and return results and artifacts
+# These scores will be used as input features for the GMU fusion stage, 
+# and the per-task models will be saved as artifacts if save_lgbm_ckpt is enabled
 def run_lgbm_fold(args, labels_train, labels_val, labels_test,
                   fp_train, fp_val, fp_test, has_test, fold=None):
     if args.task_type != "classification":
@@ -188,6 +188,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     lgbm_log_file = os.path.join(args.log_dir, f"training_log_lgbm_fold{fold+1}.txt" if fold is not None else "training_log_lgbm.txt")
     output_epoch_results(lgbm_log_file, lgbm_log, train_results)
 
+    # save the trained LGBM models as artifacts if enabled, along with metadata about the fold, model, and metrics
     if args.save_lgbm_ckpt == 1:
         ckpt_dir = os.path.join(args.log_dir, "checkpoints")
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -210,6 +211,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
             pickle.dump(artifact, f)
         print(f"Saved LGBM artifact to: {lgbm_ckpt_path}")
 
+    # generate and save AUPR and top-k hit rate plots for this fold
     lgbm_plot_path = os.path.join(args.log_dir, f"lgbm_plot_fold{fold+1}.png" if fold is not None else "lgbm_plot.png")
     if has_test:
         gen_AUPR_plot(lgbm_plot_path, 0, [train_results.get("AUPR")], [val_results.get("AUPR")], [test_results.get("AUPR")], fold)
@@ -233,7 +235,7 @@ def run_lgbm_fold(args, labels_train, labels_val, labels_test,
     }
     return lgbm_results
 
-
+# Helper function to extract fingerprint features for a given set of indices from the full ECFP4 array
 def _extract_fp_features(ecfp4_pairs, indices):
     """Extract fingerprint vectors from object rows shaped as [fingerprint, label]."""
     selected = ecfp4_pairs[indices]
@@ -241,6 +243,7 @@ def _extract_fp_features(ecfp4_pairs, indices):
         raise ValueError("Expected ecfp4 pairs shaped (n, 2) as [[fingerprint, label], ...].")
     return np.vstack(selected[:, 0]).astype(np.float32)
 
+# Helper function to extract image embeddings for a given set of indices from the full dataset using the ResNet backbone.
 @torch.no_grad()
 def _extract_image_embeddings(model, dataset, batch_size, workers, device):
     """Extract ResNet backbone embeddings for each sample in dataset order."""
@@ -276,8 +279,12 @@ def _predict_lgbm_multitask_scores(task_models, features):
         y_pro[:, task_idx] = clf.predict_proba(x)[:, 1]
     return y_pro
 
+# Class definition for the GMU fusion model, which takes image embeddings and LGBM scores as input
+# and learns to fuse them for final predictions.
 class GMUFusionModel(nn.Module):
     """GMU fusion block adapted for image embeddings + fingerprint-model scores."""
+
+    # Equations as implemented in GMU paper:
 
     def __init__(self, image_dim, fp_dim, hidden_dim, out_dim):
         super().__init__()
@@ -313,6 +320,8 @@ def _evaluate_gmu_split(model, x_img, x_fp, y_true, topk_k):
         "topk_hitrate": topk_hitrate,
     }
 
+# Train and evaluate a GMU fusion model on one fold, returning results and artifacts. 
+# This will be called for each fold in k-fold CV, as well as for the single split scenario.
 def _run_gmu_fusion_fold(args, device, fold,
                          labels_train, labels_val, labels_test,
                          img_train, img_val, img_test,
@@ -454,6 +463,9 @@ def _run_gmu_fusion_fold(args, device, fold,
 
     return gmu_results
 
+# ImageMol + LGBM training fold runner that handles dataset and dataloader creation, 
+# LGBM baseline training and evaluation, image model training and evaluation, 
+# and GMU fusion training and evaluation for one fold of k-fold CV or the single split scenario.
 def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_select, min_value,
                       name_train, labels_train, name_val, labels_val, name_test, labels_test,
                       img_transformer_train, img_transformer_test, fold=None,
@@ -642,8 +654,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
     # Lists to store metrics for plotting
     train_aupr_list, val_aupr_list, test_aupr_list = [], [], []
     train_f1_list, val_f1_list, test_f1_list = [], [], []
-    # train_topk_prec_list, val_topk_prec_list, test_topk_prec_list = [], [], []
-    # train_topk_f1_list, val_topk_f1_list, test_topk_f1_list = [], [], []
     train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list = [], [], []
     topk_k = 200
 
@@ -703,22 +713,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                                                                  k=topk_k) if 'y_pro' in test_data_dict \
                                                                  and 'y_true' in test_data_dict else None)
 
-        # Compute top-15 precision and F1 for train/val/test
-        # for split_data_dict, split_labels, prec_list, f1_list in [
-        #     (train_data_dict, labels_train, train_topk_prec_list, train_topk_f1_list),
-        #     (val_data_dict, labels_val, val_topk_prec_list, val_topk_f1_list),
-        #     (test_data_dict, labels_test, test_topk_prec_list, test_topk_f1_list)
-        # ]:
-        #     # Get predicted probabilities and true labels (flatten if multitask)
-        #     probs = split_data_dict['y_pro'].flatten() if 'y_pro' in split_data_dict else np.array([])
-        #     labels = split_data_dict['y_true'].flatten() if 'y_true' in split_data_dict else np.array([])
-        #     if len(probs) > 0 and len(labels) > 0:
-        #         prec, f1 = compute_topk_precision_f1(probs, labels, k=topk_k)
-        #     else:
-        #         prec, f1 = None, None
-        #     prec_list.append(prec)
-        #     f1_list.append(f1)
-
         if eval_metric == "topk_hitrate":
             train_result = train_topk_hitrate_list[-1]
             valid_result = val_topk_hitrate_list[-1]
@@ -733,8 +727,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         if has_test:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, 'Test AUPR': test_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1], f'Test Top{topk_k} Hit Rate': test_topk_hitrate_list[-1]}}
-                    #  f'Train Top{topk_k} Precision': train_topk_prec_list[-1], f'Val Top{topk_k} Precision': val_topk_prec_list[-1], f'Test Top{topk_k} Precision': test_topk_prec_list[-1],
-                    #  f'Train Top{topk_k} F1': train_topk_f1_list[-1], f'Val Top{topk_k} F1': val_topk_f1_list[-1], f'Test Top{topk_k} F1': test_topk_f1_list[-1]}
         else:
             epoch_log = {"fold": fold+1 if fold is not None else None, "epoch": epoch, "patience": early_stop, "Loss": train_loss, 'Train AUPR': train_result, 'Validation AUPR': valid_result, \
                      "topk_hitrate": {f'Train Top{topk_k} Hit Rate': train_topk_hitrate_list[-1], f'Val Top{topk_k} Hit Rate': val_topk_hitrate_list[-1]}}
@@ -744,6 +736,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         log_file_path = os.path.join(args.log_dir, f"training_log_fold{fold+1}.txt" if fold is not None else "training_log.txt")
         output_epoch_results(log_file_path, epoch_log, train_results)
 
+        # save the best model based on validation metric, and implement early stopping based on validation metric with patience
         if is_left_better_right(train_result, results['highest_train'], standard=valid_select):
             results['highest_train'] = train_result
         if is_left_better_right(valid_result, results['highest_valid'], standard=valid_select):
@@ -763,6 +756,7 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
         for k, v in results.items():
             if isinstance(v, np.generic):
                 results[k] = float(v)
+
         # Save checkpoint only in the final 2 epochs
         if args.save_finetune_ckpt == 1 and epoch >= args.epochs - 2:
             checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
@@ -780,9 +774,6 @@ def run_training_fold(args, device, device_ids, num_tasks, eval_metric, valid_se
                     fold)
     else:
         gen_AUPR_plot(plot_path, args.start_epoch, train_aupr_list, val_aupr_list, [], fold)
-    # gen_F1_plot(plot_path, args.start_epoch, train_f1_list, val_f1_list, test_f1_list, fold)
-    # gen_topk_precf1_plots(plot_path, args.start_epoch, train_topk_prec_list, val_topk_prec_list, test_topk_prec_list,
-    #                train_topk_f1_list, val_topk_f1_list, test_topk_f1_list, topk_k, fold)
     
     if has_test:
         gen_topk_hitrate_plot(plot_path, args.start_epoch, train_topk_hitrate_list, val_topk_hitrate_list, test_topk_hitrate_list, topk_k, fold)
