@@ -157,7 +157,9 @@ The following are a list of added CLI arguments, as well as how they interact wi
 
 Different architectures are stored in different branches in this repository.
 
-Other branches have been kept as documentation of development steps, but these branches of interest contain the final pipelines for the architectures of interest:
+Other branches have been kept as documentation of development steps, and they have been renamed to contain `archive/` before their branch names.
+
+These branches of interest contain the final pipelines for the architectures of interest:
 
 1. **ImageMol Branch:** `master`
 
@@ -170,6 +172,10 @@ This branch contains the training loop for concatenating ImageMol embeddings to 
 3. **GMU Branch:** `gated-multimodal-unit`
 
 This branch contains the training loop for training a GMU layer on ImageMol embeddings and LightGBM outputs. The architecture for the GMU is implemented as described by [Arevalo et. al](https://doi.org/10.1145/3136755.3136814).
+
+4. **General Fusion Branch:** `LGBM-fusion`
+
+This branch contains a training loop which trains the LGBM model alongside the ImageMol model. No fusion or experiments were performed in this branch, but it is not archived as future fusion implementations should be rooted at this branch.
 
 # Dockerization
 
