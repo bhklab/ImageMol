@@ -3,13 +3,13 @@
 Alexander Leonardos
 
 
-## Set up dataset on GCP:
+## Set up dataset on GCP: This should be done using the following Repo: [aircheck_image_utils](https://github.com/bhklab/aircheck_image_utils).
 
 **0.** Make sure that the terminal is authenticated with GCP. Instructions are on the [BHKLab handbook website.](https://bhklab.github.io/handbook/latest/software_development/Remote_Development/Google_Cloud_Platform/introduction/?h=#accessing-gcp-via-terminal)
 
 **1.**  First set up a conda environment for the following modules:
 
-    conda env create -f imagemol_data_utils.yml
+    conda env create -f conda_env.yml -n new_env_name
 
 **2.** Use `parquet_explore.py` to check column names for SMILES and Labels.
 
